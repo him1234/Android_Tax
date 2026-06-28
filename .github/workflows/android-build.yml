@@ -30,13 +30,13 @@ jobs:
           gradle-version: "8.7"
 
       - name: Verify environment
-        run: ./gradlew -v
+        run: chmod +x ./gradlew && ./gradlew -v
 
       - name: Build debug
-        run: ./gradlew :app:assembleDebug
+        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug
 
       - name: Build release
-        run: ./gradlew :app:assembleRelease
+        run: chmod +x ./gradlew && ./gradlew :app:assembleRelease
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
