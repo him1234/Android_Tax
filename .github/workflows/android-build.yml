@@ -24,19 +24,25 @@ jobs:
         with:
           packages: "platforms;android-34 build-tools;34.0.0"
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
+      - name: Download official Gradle distribution
+        run: |
+          curl -fsSL "https://services.gradle.org/distributions/gradle-8.7-bin.zip" -o "$RUNNER_TEMP/gradle-8.7-bin.zip"
+          unzip -q "$RUNNER_TEMP/gradle-8.7-bin.zip" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-8.7/bin" >> "$GITHUB_PATH"
 
-      - name: Verify environment
-        run: chmod +x ./gradlew && ./gradlew -v
+      - name: Generate wrapper from official Gradle
+        run: |
+          gradle wrapper --gradle-version 8.7 --distribution-type bin
+          chmod +x ./gradlew
+
+      - name: Verify wrapper
+        run: ./gradlew -v
 
       - name: Build debug
-        run: chmod +x ./gradlew && ./gradlew :app:assembleDebug
+        run: ./gradlew :app:assembleDebug
 
       - name: Build release
-        run: chmod +x ./gradlew && ./gradlew :app:assembleRelease
+        run: ./gradlew :app:assembleRelease
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
