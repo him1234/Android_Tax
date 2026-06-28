@@ -19,8 +19,10 @@ data class Invoice(
     val issuedOn: LocalDate,
     val createdAt: LocalDateTime = LocalDateTime.now(),
     val attachmentName: String? = null,
+    val attachmentPath: String? = null,
     val sourceFormat: AttachmentFormat? = null,
     val note: String = "",
+    val invoiceNumber: String = "",
 )
 
 enum class AttachmentFormat(val label: String) {
@@ -36,8 +38,10 @@ data class InvoiceDraft(
     val invoiceTaxRatePercent: Int = 1,
     val issuedOn: LocalDate = LocalDate.now(),
     val attachmentName: String? = null,
+    val attachmentPath: String? = null,
     val sourceFormat: AttachmentFormat? = null,
     val note: String = "",
+    val invoiceNumber: String = "",
 )
 
 data class TaxSettings(
@@ -111,14 +115,7 @@ data class QuarterTotals(
     val taxableThresholdReached: Boolean,
 )
 
-fun defaultState(seedPeople: List<Person>): LedgerUiState {
-    val first = seedPeople.first()
-    return LedgerUiState(
-        people = seedPeople,
-        draft = InvoiceDraft(
-            personId = first.id,
-            invoiceTaxRatePercent = first.defaultInvoiceTaxRatePercent,
-            issuedOn = LocalDate.now(),
-        ),
-    )
-}
+data class ExportBundle(
+    val csv: String,
+    val summaryText: String,
+)

@@ -3,10 +3,14 @@ package com.example.taxledger.data
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 
-private val TWO_DP = 2
+private const val SCALE = 2
 private val HALF_UP = RoundingMode.HALF_UP
-fun BigDecimal.money(): BigDecimal = setScale(TWO_DP, HALF_UP)
+private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd")
+
+fun BigDecimal.money(): BigDecimal = setScale(SCALE, HALF_UP)
+fun Double.money(): BigDecimal = BigDecimal.valueOf(this).money()
 
 fun String.toMoneyOrNull(): BigDecimal? = runCatching { BigDecimal(trim()) }.getOrNull()?.money()
 
@@ -50,9 +54,9 @@ fun invoiceBreakdown(
             taxBase = vat.toDouble(),
             ratePercent = taxSettings.cityConstructionTaxRatePercent,
             shouldPay = cityShouldPay.toDouble(),
-            exemptAmount = cityShouldPay.multiply(BigDecimal("0.5")).toDouble(),
+            exemptAmount = cityFinal.toDouble(),
             reductionPercent = 50,
-            reductionAmount = cityShouldPay.multiply(BigDecimal("0.5")).toDouble(),
+            reductionAmount = cityFinal.toDouble(),
             finalPayable = cityFinal.toDouble(),
         ),
         educationFee = TaxLine(
@@ -154,4 +158,65 @@ fun buildQuarterPersonSummary(
         localEducationFee = local.money().toDouble(),
         totalPayable = total.money().toDouble(),
     )
+}
+
+fun formatDate(date: LocalDate): String = DATE_FORMAT.format(date)
+
+fun buildQuarterExport(
+    year: Int,
+    quarter: Int,
+    people: List<Person>,
+    invoices: List<Invoice>,
+    taxSettings: TaxSettings,
+): ExportBundle {
+    val filtered = invoices.filter { it.issuedOn.year == year && quarterOf(it.issuedOn) == quarter }
+    val summaries = people.filter { it.isEnabled }.map { person ->
+        val personInvoices = filtered.filter { it.personId == person.id }
+        buildQuarterPersonSummary(person, personInvoices, taxSettings)
+    }
+    val totals = buildQuarterTotals(filtered, taxSettings)
+    val csv = buildString {
+        appendLine("type,person,invoice_count,gross,taxable,vat,city_tax,education_fee,local_education_fee,total")
+        summaries.forEach { item ->
+            appendLine(
+                listOf(
+                    "person",
+                    item.personName,
+                    item.invoiceCount,
+                    item.grossAmount.money().toPlainString(),
+                    item.taxableAmount.money().toPlainString(),
+                    item.vat.money().toPlainString(),
+                    item.cityTax.money().toPlainString(),
+                    item.educationFee.money().toPlainString(),
+                    item.localEducationFee.money().toPlainString(),
+                    item.totalPayable.money().toPlainString(),
+                ).joinToString(",")
+            )
+        }
+        appendLine(
+            listOf(
+                "quarter_total",
+                quarterLabel(year, quarter),
+                filtered.size,
+                totals.grossAmount.money().toPlainString(),
+                totals.taxableAmount.money().toPlainString(),
+                totals.vat.money().toPlainString(),
+                totals.cityTax.money().toPlainString(),
+                totals.educationFee.money().toPlainString(),
+                totals.localEducationFee.money().toPlainString(),
+                totals.totalPayable.money().toPlainString(),
+            ).joinToString(",")
+        )
+    }
+    val summaryText = buildString {
+        appendLine("${quarterLabel(year, quarter)} 季度导出")
+        appendLine("发票数量：${filtered.size}")
+        appendLine("含税总额：${totals.grossAmount.money().toPlainString()}")
+        appendLine("不含税总额：${totals.taxableAmount.money().toPlainString()}")
+        appendLine("应缴总税费：${totals.totalPayable.money().toPlainString()}")
+        summaries.forEach { item ->
+            appendLine("${item.personName}：${item.totalPayable.money().toPlainString()}")
+        }
+    }
+    return ExportBundle(csv = csv, summaryText = summaryText)
 }
