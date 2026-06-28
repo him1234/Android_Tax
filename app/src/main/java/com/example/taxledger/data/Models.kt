@@ -119,3 +119,15 @@ data class ExportBundle(
     val csv: String,
     val summaryText: String,
 )
+
+fun defaultState(seedPeople: List<Person>): LedgerUiState {
+    val first = seedPeople.first()
+    return LedgerUiState(
+        people = seedPeople,
+        draft = InvoiceDraft(
+            personId = first.id,
+            invoiceTaxRatePercent = first.defaultInvoiceTaxRatePercent,
+            issuedOn = LocalDate.now(),
+        ),
+    )
+}

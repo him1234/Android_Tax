@@ -1,12 +1,11 @@
 package com.example.taxledger.data
 
+import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.net.Uri
-import org.json.JSONArray
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDate
@@ -52,9 +51,8 @@ class LedgerRepository(private val context: Context) {
             if (cursor.moveToFirst()) cursor.toTaxSettings() else TaxSettings()
         }
         val ui = database.query("ui_state", null, "id=?", arrayOf("1"), null, null, null).use { cursor ->
-            if (cursor.moveToFirst()) cursor.toUiState() else null
-        } ?: UiStateRecord()
-
+            if (cursor.moveToFirst()) cursor.toUiState() else UiStateRecord()
+        }
         return LedgerSnapshot(
             people = people,
             invoices = invoices,
@@ -197,20 +195,25 @@ class LedgerRepository(private val context: Context) {
         quarterlyEducationThreshold = getLong(getColumnIndexOrThrow("quarterly_threshold")),
     )
 
+    private fun Cursor.getStringOrNull(column: String): String? {
+        val index = getColumnIndex(column)
+        return if (index >= 0 && !isNull(index)) getString(index) else null
+    }
+
     private fun Cursor.toUiState(): UiStateRecord = UiStateRecord(
         selectedYear = getInt(getColumnIndexOrThrow("selected_year")),
         selectedQuarter = getInt(getColumnIndexOrThrow("selected_quarter")),
         activeTab = runCatching { AppTab.valueOf(getString(getColumnIndexOrThrow("active_tab"))) }.getOrDefault(AppTab.Overview),
     )
 
-    private fun Person.toValues() = android.content.ContentValues().apply {
+    private fun Person.toValues() = ContentValues().apply {
         put("id", id)
         put("display_name", displayName)
         put("is_enabled", if (isEnabled) 1 else 0)
         put("default_rate", defaultInvoiceTaxRatePercent)
     }
 
-    private fun Invoice.toValues() = android.content.ContentValues().apply {
+    private fun Invoice.toValues() = ContentValues().apply {
         put("id", id)
         put("person_id", personId)
         put("gross_amount", grossAmount)
@@ -224,13 +227,13 @@ class LedgerRepository(private val context: Context) {
         put("invoice_number", invoiceNumber)
     }
 
-    private fun TaxSettings.toValues() = android.content.ContentValues().apply {
+    private fun TaxSettings.toValues() = ContentValues().apply {
         put("id", 1)
         put("city_tax_rate", cityConstructionTaxRatePercent)
         put("quarterly_threshold", quarterlyEducationThreshold)
     }
 
-    private fun UiStateRecord.toValues() = android.content.ContentValues().apply {
+    private fun UiStateRecord.toValues() = ContentValues().apply {
         put("id", 1)
         put("selected_year", selectedYear)
         put("selected_quarter", selectedQuarter)

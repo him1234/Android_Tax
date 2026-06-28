@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -96,7 +97,6 @@ import com.example.taxledger.data.TaxSettings
 import com.example.taxledger.data.buildQuarterExport
 import com.example.taxledger.data.buildQuarterPersonSummary
 import com.example.taxledger.data.buildQuarterTotals
-import com.example.taxledger.data.defaultState
 import com.example.taxledger.data.formatDate
 import com.example.taxledger.data.invoiceBreakdown
 import com.example.taxledger.data.quarterLabel
@@ -724,13 +724,5 @@ private fun LedgerSnapshot.toUiState(seedPeople: List<Person>): LedgerUiState {
             issuedOn = LocalDate.now(),
             invoiceTaxRatePercent = first?.defaultInvoiceTaxRatePercent ?: 1,
         ),
-    )
-}
-
-private fun defaultState(seedPeople: List<Person>): LedgerUiState {
-    val first = seedPeople.first()
-    return LedgerUiState(
-        people = seedPeople,
-        draft = InvoiceDraft(personId = first.id, invoiceTaxRatePercent = first.defaultInvoiceTaxRatePercent, issuedOn = LocalDate.now()),
     )
 }
