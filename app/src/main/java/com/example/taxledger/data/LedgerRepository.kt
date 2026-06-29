@@ -5,6 +5,9 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import java.io.File
 import java.io.FileOutputStream
@@ -75,12 +78,95 @@ class LedgerRepository(private val context: Context) {
         val slug = "${year}Q$quarter"
         val csvFile = File(exportsDir, "ledger_$slug.csv")
         val txtFile = File(exportsDir, "ledger_$slug.txt")
+        val pdfFile = File(exportsDir, "ledger_$slug.pdf")
         csvFile.writeText(bundle.csv)
         txtFile.writeText(bundle.summaryText)
-        return listOf(csvFile, txtFile)
+        writePdfReport(pdfFile, bundle.pdfLines)
+        return listOf(csvFile, txtFile, pdfFile)
     }
 
     fun parseImportedInvoice(uri: Uri): ImportedInvoiceDraft = importParser.parseAndPersist(uri)
+
+    private fun writePdfReport(file: File, lines: List<String>) {
+        val pageWidth = 595
+        val pageHeight = 842
+        val left = 48f
+        val right = 48f
+        val top = 52f
+        val bottom = 48f
+        val lineHeight = 19f
+        val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 11.5f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 18f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+        }
+        val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 9f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+        }
+        val document = PdfDocument()
+        var pageNumber = 0
+        var page: PdfDocument.Page? = null
+        var y = top
+
+        fun finishPage() {
+            page?.let {
+                it.canvas.drawText("第 $pageNumber 页", pageWidth - right - 44f, pageHeight - 24f, footerPaint)
+                document.finishPage(it)
+            }
+            page = null
+        }
+
+        fun startPage() {
+            pageNumber += 1
+            page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
+            y = top
+        }
+
+        fun ensurePage(heightNeeded: Float = lineHeight) {
+            if (page == null) startPage()
+            if (y + heightNeeded > pageHeight - bottom) {
+                finishPage()
+                startPage()
+            }
+        }
+
+        fun wrapLine(text: String, paint: Paint, maxWidth: Float): List<String> {
+            if (text.isBlank()) return listOf("")
+            val result = mutableListOf<String>()
+            var current = ""
+            text.forEach { char ->
+                val next = current + char
+                if (paint.measureText(next) <= maxWidth || current.isBlank()) {
+                    current = next
+                } else {
+                    result += current
+                    current = char.toString()
+                }
+            }
+            if (current.isNotBlank()) result += current
+            return result
+        }
+
+        lines.forEachIndexed { index, line ->
+            val isTitle = index == 0
+            val paint = if (isTitle) titlePaint else bodyPaint
+            val currentLineHeight = if (isTitle) 28f else lineHeight
+            val wrapped = wrapLine(line, paint, pageWidth - left - right)
+            wrapped.forEach { text ->
+                ensurePage(currentLineHeight)
+                page?.canvas?.drawText(text, left, y, paint)
+                y += currentLineHeight
+            }
+            if (line.isBlank()) y += 4f
+        }
+        finishPage()
+        FileOutputStream(file).use { output -> document.writeTo(output) }
+        document.close()
+    }
 
     fun addPerson(name: String): Person {
         val person = Person(displayName = name.trim())

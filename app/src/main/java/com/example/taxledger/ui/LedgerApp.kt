@@ -79,7 +79,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -91,13 +93,15 @@ import com.example.taxledger.data.LedgerRepository
 import com.example.taxledger.data.LedgerSnapshot
 import com.example.taxledger.data.LedgerUiState
 import com.example.taxledger.data.Person
+import com.example.taxledger.data.QuarterInvoiceTaxDetail
 import com.example.taxledger.data.QuarterPersonSummary
 import com.example.taxledger.data.QuarterTotals
 import com.example.taxledger.data.TaxLine
 import com.example.taxledger.data.TaxSettings
 import com.example.taxledger.data.buildTaxLine
 import com.example.taxledger.data.buildQuarterExport
-import com.example.taxledger.data.buildQuarterPersonSummary
+import com.example.taxledger.data.buildQuarterInvoiceDetails
+import com.example.taxledger.data.buildQuarterPersonSummaries
 import com.example.taxledger.data.buildQuarterTotals
 import com.example.taxledger.data.defaultState
 import com.example.taxledger.data.formatDate
@@ -296,7 +300,7 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
         val current = state.value
         val bundle = buildQuarterExport(current.selectedYear, current.selectedQuarter, current.people, current.invoices, current.taxSettings)
         val files = repository.exportQuarter(current.selectedYear, current.selectedQuarter, bundle)
-        update { it.copy(statusMessage = "已导出季度报表") }
+        update { it.copy(statusMessage = "已导出季度PDF明细") }
         return files
     }
 
@@ -401,11 +405,15 @@ fun TaxLedgerApp() {
 @Composable
 private fun AppTopBar(state: LedgerUiState, viewModel: LedgerViewModel, repository: LedgerRepository) {
     val context = LocalContext.current
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         if (uri != null) {
             val files = viewModel.exportQuarter(repository)
-            val exportedText = files.joinToString("\n") { it.absolutePath }
-            context.contentResolver.openOutputStream(uri)?.use { output -> output.write(exportedText.toByteArray()) }
+            val pdfFile = files.firstOrNull { it.extension.equals("pdf", ignoreCase = true) }
+            if (pdfFile != null) {
+                context.contentResolver.openOutputStream(uri)?.use { output ->
+                    pdfFile.inputStream().use { input -> input.copyTo(output) }
+                }
+            }
         }
     }
 
@@ -417,8 +425,8 @@ private fun AppTopBar(state: LedgerUiState, viewModel: LedgerViewModel, reposito
             }
         },
         actions = {
-            IconButton(onClick = { exportLauncher.launch("quarter_report.txt") }) {
-                Icon(Icons.Default.Download, contentDescription = "导出")
+            IconButton(onClick = { exportLauncher.launch("quarter_tax_detail_${state.selectedYear}Q${state.selectedQuarter}.pdf") }) {
+                Icon(Icons.Default.Download, contentDescription = "导出PDF")
             }
             IconButton(onClick = { viewModel.setTab(AppTab.Settings) }) {
                 Icon(Icons.Default.Settings, contentDescription = "设置")
@@ -452,7 +460,9 @@ private fun AppContent(state: LedgerUiState, viewModel: LedgerViewModel, reposit
 private fun OverviewTab(state: LedgerUiState, viewModel: LedgerViewModel) {
     val quarterInvoices = state.currentQuarterInvoices()
     val totals = buildQuarterTotals(quarterInvoices, state.taxSettings)
-    val summaries = state.people.filter { it.isEnabled }.map { buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings) }
+    val details = buildQuarterInvoiceDetails(state.selectedYear, state.selectedQuarter, state.people, state.invoices, state.taxSettings)
+    val reportPeople = state.people.filter { it.isEnabled || details.any { detail -> detail.personId == it.id } }
+    val summaries = buildQuarterPersonSummaries(reportPeople, details)
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SummaryHero(state, totals)
@@ -462,7 +472,9 @@ private fun OverviewTab(state: LedgerUiState, viewModel: LedgerViewModel) {
             StatCard("不含税额", "¥${totals.taxableAmount.format2()}", Icons.Default.Storage, Modifier.weight(1f))
         }
         SectionTitle("人员概览")
-        summaries.forEach { PersonSummaryCard(it) }
+        summaries.forEach { summary ->
+            PersonSummaryCard(summary, details.filter { it.personId == summary.personId })
+        }
         SectionTitle("最近发票")
         state.invoices.takeLast(6).asReversed().forEach { invoice ->
             InvoiceRow(invoice, state.people.firstOrNull { it.id == invoice.personId }?.displayName ?: "未命名", onEdit = { viewModel.editInvoice(invoice) }, onDelete = { viewModel.deleteInvoice(invoice.id) }, onRedFlush = { viewModel.redFlushInvoice(invoice) })
@@ -539,7 +551,9 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
 private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel) {
     val quarterInvoices = state.currentQuarterInvoices()
     val totals = buildQuarterTotals(quarterInvoices, state.taxSettings)
-    val summaries = state.people.filter { it.isEnabled }.map { buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings) }
+    val details = buildQuarterInvoiceDetails(state.selectedYear, state.selectedQuarter, state.people, state.invoices, state.taxSettings)
+    val reportPeople = state.people.filter { it.isEnabled || details.any { detail -> detail.personId == it.id } }
+    val summaries = buildQuarterPersonSummaries(reportPeople, details)
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SectionTitle("季度汇总")
         QuarterSelector(state.selectedYear, state.selectedQuarter, viewModel::setQuarter)
@@ -547,7 +561,9 @@ private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel) {
         SectionTitle("税费明细")
         TaxLineSection(state, totals)
         SectionTitle("人员分摊")
-        summaries.forEach { PersonSummaryCard(it) }
+        summaries.forEach { summary ->
+            PersonSummaryCard(summary, details.filter { it.personId == summary.personId })
+        }
     }
 }
 
@@ -688,7 +704,8 @@ private fun TaxLineCard(line: TaxLine) {
 }
 
 @Composable
-private fun PersonSummaryCard(summary: QuarterPersonSummary) {
+private fun PersonSummaryCard(summary: QuarterPersonSummary, details: List<QuarterInvoiceTaxDetail>) {
+    var expanded by remember(summary.personId, details.size) { mutableStateOf(false) }
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -703,8 +720,61 @@ private fun PersonSummaryCard(summary: QuarterPersonSummary) {
                 AssistChip(onClick = {}, label = { Text("不含税 ¥${summary.taxableAmount.format2()}") })
                 AssistChip(onClick = {}, label = { Text("税费 ¥${summary.vat.format2()}") })
             }
+            OutlinedButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
+                Text(if (expanded) "收起税费明细" else "查看税费明细")
+            }
+            if (expanded) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (details.isEmpty()) {
+                        Text("本季度暂无发票明细", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    details.forEach { detail ->
+                        PersonInvoiceTaxDetailCard(detail)
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun PersonInvoiceTaxDetailCard(detail: QuarterInvoiceTaxDetail) {
+    val invoice = detail.invoice
+    val breakdown = detail.breakdown
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(invoice.invoiceNumber.ifBlank { "未填写票号" }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (invoice.isRedFlush) AssistChip(onClick = {}, label = { Text("红冲") })
+                    }
+                    Text("${formatDate(invoice.issuedOn)} · 税率 ${invoice.invoiceTaxRatePercent}%", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text("¥${breakdown.totalPayable.format2()}", fontWeight = FontWeight.Bold)
+            }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                AssistChip(onClick = {}, label = { Text("含税 ¥${invoice.signedGrossText()}") })
+                AssistChip(onClick = {}, label = { Text("不含税 ¥${breakdown.taxableAmount.format2()}") })
+                AssistChip(onClick = {}, label = { Text("增值税 ¥${breakdown.vat.format2()}") })
+                AssistChip(onClick = {}, label = { Text("城建 ¥${breakdown.cityTax.finalPayable.format2()}") })
+                AssistChip(onClick = {}, label = { Text("教育 ¥${breakdown.educationFee.finalPayable.format2()}") })
+                AssistChip(onClick = {}, label = { Text("地方教育 ¥${breakdown.localEducationFee.finalPayable.format2()}") })
+            }
+            TaxMiniLine(breakdown.cityTax)
+            TaxMiniLine(breakdown.educationFee)
+            TaxMiniLine(breakdown.localEducationFee)
+        }
+    }
+}
+
+@Composable
+private fun TaxMiniLine(line: TaxLine) {
+    Text(
+        "${line.name}: 计税依据 ¥${line.taxBase.format2()}，税率 ${line.ratePercent}%，应纳 ¥${line.shouldPay.format2()}，减免/减征 ¥${line.reductionAmount.format2()}，应补退 ¥${line.finalPayable.format2()}",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -757,13 +827,42 @@ private fun MetricBlock(label: String, value: String) {
 
 @Composable
 private fun StatCard(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier = Modifier) {
-    OutlinedCard(modifier = modifier.widthIn(min = 120.dp)) {
+    OutlinedCard(modifier = modifier) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(icon, contentDescription = null)
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AutoFitSingleLineText(
+                text = value,
+                fontSize = MaterialTheme.typography.titleLarge.fontSize,
+                minFontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
     }
+}
+
+@Composable
+private fun AutoFitSingleLineText(
+    text: String,
+    fontSize: TextUnit,
+    minFontSize: TextUnit,
+    fontWeight: FontWeight,
+    modifier: Modifier = Modifier,
+) {
+    var resizedFontSize by remember(text, fontSize) { mutableStateOf(fontSize) }
+    Text(
+        text = text,
+        modifier = modifier.fillMaxWidth(),
+        fontSize = resizedFontSize,
+        fontWeight = fontWeight,
+        maxLines = 1,
+        overflow = TextOverflow.Clip,
+        onTextLayout = { result ->
+            if (result.hasVisualOverflow && resizedFontSize.value > minFontSize.value) {
+                resizedFontSize = (resizedFontSize.value - 1).coerceAtLeast(minFontSize.value).sp
+            }
+        },
+    )
 }
 
 @Composable
@@ -830,6 +929,12 @@ private fun InvoiceDraft.toInvoicePreview(state: LedgerUiState): InvoiceBreakdow
 
 private fun Double.format2(): String = "%.2f".format(this)
 private fun BigDecimal.format2(): String = this.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+
+private fun Invoice.signedGrossText(): String {
+    val gross = grossAmount.toMoneyOrNull() ?: return grossAmount
+    val signed = if (isRedFlush) gross.negate() else gross
+    return signed.format2()
+}
 
 private fun Invoice.asDraft(): InvoiceDraft = InvoiceDraft(
     personId = personId,

@@ -128,6 +128,13 @@ data class QuarterPersonSummary(
     val totalPayable: Double,
 )
 
+data class QuarterInvoiceTaxDetail(
+    val personId: String,
+    val personName: String,
+    val invoice: Invoice,
+    val breakdown: InvoiceBreakdown,
+)
+
 data class QuarterTotals(
     val grossAmount: Double,
     val taxableAmount: Double,
@@ -142,6 +149,7 @@ data class QuarterTotals(
 data class ExportBundle(
     val csv: String,
     val summaryText: String,
+    val pdfLines: List<String>,
 )
 
 data class ParsedInvoiceImport(
