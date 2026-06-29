@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -106,6 +105,7 @@ import com.example.taxledger.data.invoiceBreakdown
 import com.example.taxledger.data.quarterLabel
 import com.example.taxledger.data.quarterOf
 import com.example.taxledger.data.toMoneyOrNull
+import java.math.BigDecimal
 import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -164,10 +164,15 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
 
     fun deletePerson(personId: String) {
         update {
+            val nextPersonId = when {
+                it.draft.personId != personId && it.people.any { person -> person.id == it.draft.personId } -> it.draft.personId
+                else -> it.people.firstOrNull { person -> person.id != personId && person.isEnabled }?.id
+                    ?: it.people.firstOrNull { person -> person.id != personId }?.id.orEmpty()
+            }
             it.copy(
                 people = it.people.filterNot { person -> person.id == personId },
                 invoices = it.invoices.filterNot { invoice -> invoice.personId == personId },
-                draft = if (it.draft.personId == personId) it.draft.copy(personId = it.people.firstOrNull { person -> person.id != personId }?.id.orEmpty()) else it.draft,
+                draft = if (it.draft.personId == personId) it.draft.copy(personId = nextPersonId) else it.draft,
                 editingPersonId = if (it.editingPersonId == personId) null else it.editingPersonId,
                 statusMessage = "已删除人员",
             )
@@ -190,8 +195,12 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
         runCatching {
             val imported = repository.parseImportedInvoice(uri)
             update {
+                val nextPersonId = it.draft.personId.takeIf { personId -> it.people.any { person -> person.id == personId } }
+                    ?: it.people.firstOrNull { person -> person.isEnabled }?.id
+                    ?: it.people.firstOrNull()?.id.orEmpty()
                 it.copy(
                     draft = it.draft.copy(
+                        personId = nextPersonId,
                         grossAmount = imported.grossAmount,
                         issuedOn = imported.issuedOn,
                         invoiceNumber = imported.invoiceNumber,
@@ -230,17 +239,24 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
     }
 
     fun editInvoice(invoice: Invoice) {
-        update { it.copy(draft = invoice.toDraft(), activeTab = AppTab.Entry, editingInvoiceId = invoice.id) }
+        update { it.copy(draft = invoice.asDraft(), activeTab = AppTab.Entry, editingInvoiceId = invoice.id) }
     }
 
     fun deleteInvoice(invoiceId: String) {
-        update { it.copy(invoices = it.invoices.filterNot { invoice -> invoice.id == invoiceId }, statusMessage = "已删除发票") }
+        update {
+            it.copy(
+                invoices = it.invoices.filterNot { invoice -> invoice.id == invoiceId },
+                editingInvoiceId = if (it.editingInvoiceId == invoiceId) null else it.editingInvoiceId,
+                draft = if (it.draft.originalInvoiceId == invoiceId) it.draft.copy(isRedFlush = false, originalInvoiceId = null) else it.draft,
+                statusMessage = "已删除发票",
+            )
+        }
     }
 
     fun redFlushInvoice(invoice: Invoice) {
         update {
             it.copy(
-                draft = invoice.toDraft().copy(
+                draft = invoice.asDraft().copy(
                     grossAmount = invoice.grossAmount,
                     isRedFlush = true,
                     originalInvoiceId = invoice.id,
@@ -266,6 +282,7 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
                     invoiceTaxRatePercent = red.invoiceTaxRatePercent,
                 ),
                 editingInvoiceId = null,
+                activeTab = AppTab.Quarter,
                 statusMessage = "已保存红冲发票",
             )
         }
@@ -501,11 +518,13 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
                 OutlinedTextField(value = draft.note, onValueChange = { value -> viewModel.updateDraft { it.copy(note = value) } }, modifier = Modifier.fillMaxWidth(), label = { Text("备注") }, minLines = 2)
                 BreakdownPreview(preview)
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                    Button(onClick = if (draft.isRedFlush) viewModel::saveRedFlush else viewModel::saveInvoice, modifier = Modifier.weight(1f)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = if (draft.isRedFlush) viewModel::saveRedFlush else viewModel::saveInvoice, modifier = Modifier.fillMaxWidth()) {
                         Text(if (draft.isRedFlush) "保存红冲" else if (state.editingInvoiceId != null) "保存修改" else "保存发票")
                     }
-                    OutlinedButton(onClick = { viewModel.updateDraft { it.copy(isRedFlush = false, originalInvoiceId = null) } }) { Text("清除红冲") }
+                    OutlinedButton(onClick = { viewModel.updateDraft { it.copy(isRedFlush = false, originalInvoiceId = null) } }, modifier = Modifier.fillMaxWidth()) {
+                        Text("清除红冲")
+                    }
                 }
             }
         }
@@ -794,7 +813,16 @@ private fun AppTab.icon() = when (this) {
     AppTab.Settings -> Icons.Default.Settings
 }
 
-private fun InvoiceDraft.toInvoice(): Invoice = Invoice(
+private fun InvoiceDraft.toInvoicePreview(state: LedgerUiState): InvoiceBreakdown? {
+    if (personId.isBlank()) return null
+    val quarterInvoices = state.currentQuarterInvoices().filter { it.issuedOn <= issuedOn }
+    return invoiceBreakdown(toInvoice(), quarterInvoices, state.taxSettings)
+}
+
+private fun Double.format2(): String = "%.2f".format(this)
+private fun BigDecimal.format2(): String = this.setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+
+private fun Invoice.asDraft(): InvoiceDraft = InvoiceDraft(
     personId = personId,
     grossAmount = grossAmount,
     invoiceTaxRatePercent = invoiceTaxRatePercent,
@@ -813,14 +841,6 @@ private fun InvoiceDraft.toInvoice(): Invoice = Invoice(
     educationFeeReductionPercent = educationFeeReductionPercent,
     localEducationFeeReductionPercent = localEducationFeeReductionPercent,
 )
-
-private fun InvoiceDraft.toInvoicePreview(state: LedgerUiState): InvoiceBreakdown? {
-    if (personId.isBlank()) return null
-    val quarterInvoices = state.currentQuarterInvoices().filter { it.issuedOn <= issuedOn }
-    return invoiceBreakdown(toInvoice(), quarterInvoices, state.taxSettings)
-}
-
-private fun Double.format2(): String = "%.2f".format(this)
 
 private fun InvoiceDraft.toInvoice(existingId: String? = null): Invoice = Invoice(
     id = existingId ?: UUID.randomUUID().toString(),
