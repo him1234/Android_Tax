@@ -77,7 +77,7 @@ fun invoiceBreakdown(
     val gross = invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO
     val rate = rateOf(invoice.invoiceTaxRatePercent)
     val taxable = gross.divide(BigDecimal.ONE.add(rate), 10, HALF_UP).money()
-    val vat = taxable.multiply(rate).money()
+    val vat = gross.subtract(taxable).money()
 
     val cityRate = invoice.cityTaxRatePercent ?: taxSettings.cityConstructionTaxRatePercent
     val cityReduction = invoice.cityTaxReductionPercent ?: taxSettings.cityConstructionTaxReductionPercent
@@ -94,9 +94,6 @@ fun invoiceBreakdown(
     }.money()
 
     val thresholdReached = taxableBefore.add(taxable) > BigDecimal(taxSettings.quarterlyEducationThreshold)
-    val educationShouldPay = vat.multiply(rateOf(educationRate)).money()
-    val localShouldPay = vat.multiply(rateOf(localRate)).money()
-
     val cityLine = taxLine("城市维护建设税", vat, cityRate, cityReduction, false)
     val educationLine = taxLine("教育费附加", vat, educationRate, if (thresholdReached) 0 else educationReduction, !thresholdReached)
     val localLine = taxLine("地方教育附加", vat, localRate, if (thresholdReached) 0 else localReduction, !thresholdReached)

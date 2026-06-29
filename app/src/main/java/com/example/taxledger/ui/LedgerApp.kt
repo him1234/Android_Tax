@@ -46,7 +46,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
@@ -58,6 +57,7 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -778,7 +778,7 @@ private fun PersonPicker(people: List<Person>, selectedPersonId: String, onSelec
                 people.forEach { person ->
                     DropdownMenuItem(text = { Text(person.displayName) }, onClick = { expanded = false; onSelected(person) })
                 }
-                Divider()
+                HorizontalDivider()
                 DropdownMenuItem(text = { Text("新增人员") }, onClick = { expanded = false; onAddPerson() })
             }
         }

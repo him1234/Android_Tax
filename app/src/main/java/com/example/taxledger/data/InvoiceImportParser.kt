@@ -37,7 +37,7 @@ class InvoiceImportParser(
         val bytes = file.readBytes()
         return when {
             format == AttachmentFormat.Ofd || isZip(bytes) -> parseOfd(bytes)
-            format == AttachmentFormat.Xml || looksLikeXml(bytes) -> parseXmlInvoice(bytes)
+            format == AttachmentFormat.Xml || looksLikeXml(bytes) -> parseXmlInvoiceSafely(bytes)
             format == AttachmentFormat.Pdf -> parsePdf(bytes)
             format == AttachmentFormat.Png || format == AttachmentFormat.Jpg -> parseFallback("", "图片票据需要OCR")
             else -> parseFallback(safeDecode(bytes), "未知格式")
@@ -52,27 +52,35 @@ class InvoiceImportParser(
             }
         }
 
-        entries["OFD.xml"]?.let { ofdXml ->
-            val xml = safeDecode(ofdXml)
-            val invoiceNumber = firstOf(xml, listOf("发票号码", "InvoiceNumber", "invoiceNumber"))
-            val gross = firstOf(xml, listOf("合计金额", "价税合计", "Amount", "TotalAmount"))
-            val tax = firstOf(xml, listOf("合计税额", "税额", "TotalTaxAm", "TaxAmount"))
-            val issueDate = parseDate(firstOf(xml, listOf("开票日期", "IssueDate", "IssueTime")))
+        val ofdXml = entries["OFD.xml"]?.let(::safeDecode).orEmpty()
+        val customTagXml = entries.entries.firstOrNull { it.key.endsWith("CustomTag.xml", ignoreCase = true) }?.value?.let(::safeDecode).orEmpty()
+        val contentXml = entries.entries.firstOrNull { it.key.endsWith("Pages/Page_0/Content.xml", ignoreCase = true) }?.value?.let(::safeDecode).orEmpty()
+        val taggedValues = parseOfdTaggedValues(customTagXml, contentXml)
+
+        if (ofdXml.isNotBlank()) {
+            val invoiceNumber = firstOf(ofdXml, listOf("发票号码", "InvoiceNumber", "invoiceNumber"))
+                ?: taggedValues["InvoiceNo"]
+            val gross = taggedValues["TaxInclusiveTotalAmount"]
+                ?: customData(ofdXml, "价税合计")
+                ?: customData(ofdXml, "TaxInclusiveTotalAmount")
+            val tax = firstOf(ofdXml, listOf("合计税额", "税额", "TotalTaxAm", "TaxAmount"))
+                ?: taggedValues["TaxTotalAmount"]
+            val issueDate = parseDate(firstOf(ofdXml, listOf("开票日期", "IssueDate", "IssueTime")) ?: taggedValues["IssueDate"])
             if (invoiceNumber != null || gross != null || issueDate != null) {
                 return ParsedInvoiceImport(
                     grossAmount = gross,
                     issuedOn = issueDate,
                     invoiceNumber = invoiceNumber.orEmpty(),
                     taxRatePercent = null,
-                    buyerName = firstOf(xml, listOf("购买方名称", "BuyerName", "PurchaserName")),
-                    sellerName = firstOf(xml, listOf("销售方名称", "SellerName")),
+                    buyerName = firstOf(ofdXml, listOf("购买方名称", "BuyerName", "PurchaserName")) ?: taggedValues["BuyerName"],
+                    sellerName = firstOf(ofdXml, listOf("销售方名称", "SellerName")) ?: taggedValues["SellerName"],
                     taxAmount = tax,
-                    sourceHint = "OFD.xml",
+                    sourceHint = "OFD结构化",
                 )
             }
         }
 
-        entries.values.firstOrNull { safeDecode(it).contains("<EInvoice", ignoreCase = true) }?.let { return parseXmlInvoice(it) }
+        entries.values.firstOrNull { safeDecode(it).contains("<EInvoice", ignoreCase = true) }?.let { return parseXmlInvoiceSafely(it) }
 
         entries.values.forEach { chunk ->
             val text = safeDecode(chunk)
@@ -100,7 +108,11 @@ class InvoiceImportParser(
         val xml = safeDecode(bytes)
         val root = parseXml(xml)
         return ParsedInvoiceImport(
-            grossAmount = root.textOf("TotalAmWithoutTax") ?: root.textOf("Amount") ?: root.textOf("TotalAmount"),
+            grossAmount = root.textOf("TaxInclusiveTotalAmount")
+                ?: root.textOf("TotalAmount")
+                ?: root.textOf("AmountWithTax")
+                ?: root.textOf("TotalAmWithTax")
+                ?: root.textOf("Amount"),
             issuedOn = parseDate(root.textOf("IssueTime") ?: root.textOf("RequestTime") ?: root.textOf("IssueDate")),
             invoiceNumber = root.textOf("InvoiceNumber") ?: root.textOf("EIid").orEmpty(),
             taxRatePercent = parseTaxRate(root.textOf("TaxRate")),
@@ -114,8 +126,13 @@ class InvoiceImportParser(
     private fun parsePdf(bytes: ByteArray): ParsedInvoiceImport {
         val text = safeDecode(bytes)
         val embedded = text.indexOf("<EInvoice")
-        if (embedded >= 0) return parseXmlInvoice(text.substring(embedded).toByteArray(Charsets.UTF_8))
+        if (embedded >= 0) return parseXmlInvoiceSafely(text.substring(embedded).toByteArray(Charsets.UTF_8))
         return parseFallback(text, "PDF文本层")
+    }
+
+    private fun parseXmlInvoiceSafely(bytes: ByteArray): ParsedInvoiceImport {
+        return runCatching { parseXmlInvoice(bytes) }
+            .getOrElse { parseStructuredXmlText(safeDecode(bytes)) ?: parseFallback(safeDecode(bytes), "XML文本兜底") }
     }
 
     private fun parseFallback(text: String, hint: String): ParsedInvoiceImport = ParsedInvoiceImport(
@@ -181,7 +198,7 @@ class InvoiceImportParser(
 
     private fun parseXml(xml: String): XmlRoot {
         val factory = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = false
+            isNamespaceAware = true
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
             setFeature("http://xml.org/sax/features/external-general-entities", false)
             setFeature("http://xml.org/sax/features/external-parameter-entities", false)
@@ -196,6 +213,15 @@ class InvoiceImportParser(
         return regex.find(xml)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
     }
 
+    private fun customData(xml: String, name: String): String? {
+        return Regex("""<[^:>]*:?CustomData\s+Name=["']${Regex.escape(name)}["'][^>]*>(.*?)</[^:>]*:?CustomData>""", RegexOption.DOT_MATCHES_ALL)
+            .find(xml)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+    }
+
     private fun firstOf(xml: String, names: List<String>): String? {
         names.forEach { name ->
             tag(xml, name)?.let { return it }
@@ -207,7 +233,7 @@ class InvoiceImportParser(
     private fun parseStructuredXmlText(text: String): ParsedInvoiceImport? {
         if (!text.contains("<", ignoreCase = true)) return null
         val invoiceNumber = firstOf(text, listOf("发票号码", "InvoiceNumber", "invoiceNumber"))
-        val gross = firstOf(text, listOf("合计金额", "价税合计", "Amount", "TotalAmount", "TotalAmWithoutTax"))
+        val gross = firstOf(text, listOf("价税合计", "TaxInclusiveTotalAmount", "TotalAmount", "AmountWithTax", "TotalAmWithTax", "Amount"))
         val issueDate = parseDate(firstOf(text, listOf("开票日期", "IssueDate", "IssueTime", "RequestTime")))
         val tax = firstOf(text, listOf("合计税额", "税额", "TotalTaxAm", "TaxAmount", "Tax"))
         val taxRate = parseTaxRate(firstOf(text, listOf("税率", "TaxRate")))
@@ -261,13 +287,40 @@ class InvoiceImportParser(
             ?.first
     }
 
+    private fun parseOfdTaggedValues(customTagXml: String, contentXml: String): Map<String, String> {
+        if (customTagXml.isBlank() || contentXml.isBlank()) return emptyMap()
+        val textById = Regex("""<ofd:TextObject\s+ID=["']([^"']+)["'][\s\S]*?<ofd:TextCode[^>]*>([\s\S]*?)</ofd:TextCode>""")
+            .findAll(contentXml)
+            .associate { match ->
+                match.groupValues[1] to match.groupValues[2].trim()
+            }
+        val result = mutableMapOf<String, String>()
+        Regex("""<ofd:([A-Za-z0-9]+)>[\s\S]*?</ofd:\1>""")
+            .findAll(customTagXml)
+            .forEach { tagMatch ->
+                val tagName = tagMatch.groupValues[1]
+                val value = Regex("""<ofd:ObjectRef[^>]*>([^<]+)</ofd:ObjectRef>""")
+                    .findAll(tagMatch.value)
+                    .mapNotNull { ref -> textById[ref.groupValues[1]] }
+                    .filter { it != "¥" }
+                    .joinToString("")
+                    .trim()
+                if (value.isNotBlank()) result[tagName] = value
+            }
+        return result
+    }
+
     private fun sanitizeFileName(name: String): String = name.replace(Regex("""[\\/:*?"<>|]"""), "_")
 }
 
 private class XmlRoot(private val element: org.w3c.dom.Element) {
     fun textOf(tagName: String): String? {
         val nodes = element.getElementsByTagName(tagName)
-        if (nodes.length == 0) return null
+        if (nodes.length == 0) {
+            val localNodes = element.getElementsByTagNameNS("*", tagName)
+            if (localNodes.length == 0) return null
+            return localNodes.item(0)?.textContent?.trim()?.takeIf { it.isNotBlank() }
+        }
         return nodes.item(0)?.textContent?.trim()?.takeIf { it.isNotBlank() }
     }
 }
