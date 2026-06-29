@@ -272,6 +272,10 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
         val current = state.value
         val sourceId = current.draft.originalInvoiceId ?: return saveInvoice()
         val source = current.invoices.firstOrNull { it.id == sourceId } ?: return
+        if (current.invoices.any { it.originalInvoiceId == sourceId || (it.isRedFlush && it.invoiceNumber == source.invoiceNumber && it.personId == source.personId) }) {
+            update { it.copy(statusMessage = "该发票已存在红冲记录") }
+            return
+        }
         val red = repository.createRedFlush(source, current.draft)
         update {
             it.copy(
@@ -452,10 +456,10 @@ private fun OverviewTab(state: LedgerUiState, viewModel: LedgerViewModel) {
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SummaryHero(state, totals)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            StatCard("本季发票", quarterInvoices.size.toString(), Icons.Default.Description)
-            StatCard("本季税费", "¥${totals.totalPayable.format2()}", Icons.Default.Calculate)
-            StatCard("不含税额", "¥${totals.taxableAmount.format2()}", Icons.Default.Storage)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            StatCard("本季发票", quarterInvoices.size.toString(), Icons.Default.Description, Modifier.weight(1f))
+            StatCard("本季税费", "¥${totals.totalPayable.format2()}", Icons.Default.Calculate, Modifier.weight(1f))
+            StatCard("不含税额", "¥${totals.taxableAmount.format2()}", Icons.Default.Storage, Modifier.weight(1f))
         }
         SectionTitle("人员概览")
         summaries.forEach { PersonSummaryCard(it) }
@@ -708,7 +712,12 @@ private fun InvoiceRow(invoice: Invoice, personName: String, onEdit: () -> Unit,
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(personName, fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(personName, fontWeight = FontWeight.SemiBold)
+                    if (invoice.isRedFlush) {
+                        AssistChip(onClick = {}, label = { Text("红冲") })
+                    }
+                }
                 Text("¥${invoice.grossAmount.toMoneyOrNull()?.format2() ?: invoice.grossAmount}")
             }
             Text("${invoice.issuedOn.format(DatePattern)} · ${invoice.invoiceTaxRatePercent}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -747,8 +756,8 @@ private fun MetricBlock(label: String, value: String) {
 }
 
 @Composable
-private fun StatCard(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    OutlinedCard(modifier = Modifier.widthIn(min = 120.dp)) {
+private fun StatCard(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, modifier: Modifier = Modifier) {
+    OutlinedCard(modifier = modifier.widthIn(min = 120.dp)) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Icon(icon, contentDescription = null)
             Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
