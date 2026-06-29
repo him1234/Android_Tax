@@ -23,6 +23,14 @@ data class Invoice(
     val sourceFormat: AttachmentFormat? = null,
     val note: String = "",
     val invoiceNumber: String = "",
+    val isRedFlush: Boolean = false,
+    val originalInvoiceId: String? = null,
+    val cityTaxRatePercent: Int? = null,
+    val educationFeeRatePercent: Int? = null,
+    val localEducationFeeRatePercent: Int? = null,
+    val cityTaxReductionPercent: Int? = null,
+    val educationFeeReductionPercent: Int? = null,
+    val localEducationFeeReductionPercent: Int? = null,
 )
 
 enum class AttachmentFormat(val label: String) {
@@ -30,6 +38,7 @@ enum class AttachmentFormat(val label: String) {
     Png("PNG"),
     Jpg("JPG"),
     Ofd("OFD"),
+    Xml("XML"),
 }
 
 data class InvoiceDraft(
@@ -42,10 +51,23 @@ data class InvoiceDraft(
     val sourceFormat: AttachmentFormat? = null,
     val note: String = "",
     val invoiceNumber: String = "",
+    val isRedFlush: Boolean = false,
+    val originalInvoiceId: String? = null,
+    val cityTaxRatePercent: Int? = null,
+    val educationFeeRatePercent: Int? = null,
+    val localEducationFeeRatePercent: Int? = null,
+    val cityTaxReductionPercent: Int? = null,
+    val educationFeeReductionPercent: Int? = null,
+    val localEducationFeeReductionPercent: Int? = null,
 )
 
 data class TaxSettings(
     val cityConstructionTaxRatePercent: Int = 5,
+    val cityConstructionTaxReductionPercent: Int = 50,
+    val educationFeeRatePercent: Int = 3,
+    val educationFeeReductionPercent: Int = 100,
+    val localEducationFeeRatePercent: Int = 2,
+    val localEducationFeeReductionPercent: Int = 100,
     val quarterlyEducationThreshold: Long = 300_000L,
 )
 
@@ -67,6 +89,8 @@ data class LedgerUiState(
     val taxSettings: TaxSettings = TaxSettings(),
     val pendingPersonName: String = "",
     val showAddPersonDialog: Boolean = false,
+    val editingPersonId: String? = null,
+    val editingInvoiceId: String? = null,
     val statusMessage: String? = null,
 )
 
@@ -120,14 +144,45 @@ data class ExportBundle(
     val summaryText: String,
 )
 
+data class ParsedInvoiceImport(
+    val grossAmount: String?,
+    val issuedOn: LocalDate?,
+    val invoiceNumber: String,
+    val taxRatePercent: Int?,
+    val buyerName: String?,
+    val sellerName: String?,
+    val taxAmount: String?,
+    val sourceHint: String,
+)
+
 fun defaultState(seedPeople: List<Person>): LedgerUiState {
-    val first = seedPeople.first()
+    val first = seedPeople.firstOrNull()
     return LedgerUiState(
         people = seedPeople,
         draft = InvoiceDraft(
-            personId = first.id,
-            invoiceTaxRatePercent = first.defaultInvoiceTaxRatePercent,
+            personId = first?.id.orEmpty(),
+            invoiceTaxRatePercent = first?.defaultInvoiceTaxRatePercent ?: 1,
             issuedOn = LocalDate.now(),
         ),
     )
 }
+
+fun Invoice.toDraft(): InvoiceDraft = InvoiceDraft(
+    personId = personId,
+    grossAmount = grossAmount,
+    invoiceTaxRatePercent = invoiceTaxRatePercent,
+    issuedOn = issuedOn,
+    attachmentName = attachmentName,
+    attachmentPath = attachmentPath,
+    sourceFormat = sourceFormat,
+    note = note,
+    invoiceNumber = invoiceNumber,
+    isRedFlush = isRedFlush,
+    originalInvoiceId = originalInvoiceId,
+    cityTaxRatePercent = cityTaxRatePercent,
+    educationFeeRatePercent = educationFeeRatePercent,
+    localEducationFeeRatePercent = localEducationFeeRatePercent,
+    cityTaxReductionPercent = cityTaxReductionPercent,
+    educationFeeReductionPercent = educationFeeReductionPercent,
+    localEducationFeeReductionPercent = localEducationFeeReductionPercent,
+)

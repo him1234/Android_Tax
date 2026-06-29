@@ -28,11 +28,10 @@ jobs:
         run: |
           curl -fsSL "https://services.gradle.org/distributions/gradle-8.7-bin.zip" -o "$RUNNER_TEMP/gradle-8.7-bin.zip"
           unzip -q "$RUNNER_TEMP/gradle-8.7-bin.zip" -d "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/gradle-8.7/bin" >> "$GITHUB_PATH"
 
       - name: Generate wrapper from official Gradle
         run: |
-          gradle wrapper --gradle-version 8.7 --distribution-type bin
+          "$RUNNER_TEMP/gradle-8.7/bin/gradle" wrapper --gradle-version 8.7 --distribution-type bin
           chmod +x ./gradlew
 
       - name: Verify wrapper

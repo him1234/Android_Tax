@@ -1,10 +1,11 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+)
 
 package com.example.taxledger.ui
 
-import android.content.Context
 import android.net.Uri
-import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.weight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -29,12 +31,14 @@ import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.FilterAlt
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.UploadFile
@@ -81,7 +85,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.taxledger.data.AppTab
-import com.example.taxledger.data.AttachmentFormat
 import com.example.taxledger.data.Invoice
 import com.example.taxledger.data.InvoiceBreakdown
 import com.example.taxledger.data.InvoiceDraft
@@ -93,6 +96,7 @@ import com.example.taxledger.data.QuarterPersonSummary
 import com.example.taxledger.data.QuarterTotals
 import com.example.taxledger.data.TaxLine
 import com.example.taxledger.data.TaxSettings
+import com.example.taxledger.data.buildTaxLine
 import com.example.taxledger.data.buildQuarterExport
 import com.example.taxledger.data.buildQuarterPersonSummary
 import com.example.taxledger.data.buildQuarterTotals
@@ -102,14 +106,13 @@ import com.example.taxledger.data.invoiceBreakdown
 import com.example.taxledger.data.quarterLabel
 import com.example.taxledger.data.quarterOf
 import com.example.taxledger.data.toMoneyOrNull
-import java.math.BigDecimal
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.UUID
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 private val DatePattern = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
@@ -124,24 +127,49 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
 
     fun setTab(tab: AppTab) = update { it.copy(activeTab = tab) }
     fun setQuarter(year: Int, quarter: Int) = update { it.copy(selectedYear = year, selectedQuarter = quarter) }
-    fun openAddPersonDialog() = update { it.copy(showAddPersonDialog = true, pendingPersonName = "") }
-    fun dismissAddPersonDialog() = update { it.copy(showAddPersonDialog = false, pendingPersonName = "") }
+    fun openAddPersonDialog() = update { it.copy(showAddPersonDialog = true, pendingPersonName = "", editingPersonId = null) }
+    fun dismissPersonDialog() = update { it.copy(showAddPersonDialog = false, pendingPersonName = "", editingPersonId = null) }
     fun updatePendingPersonName(value: String) = update { it.copy(pendingPersonName = value) }
     fun consumeStatusMessage() = update { it.copy(statusMessage = null) }
     fun updateTaxSettings(block: (TaxSettings) -> TaxSettings) = update { it.copy(taxSettings = block(it.taxSettings)) }
     fun updateDraft(block: (InvoiceDraft) -> InvoiceDraft) = update { it.copy(draft = block(it.draft), statusMessage = null) }
 
-    fun addPerson() {
-        val name = state.value.pendingPersonName.trim()
-        if (name.isBlank()) return
+    fun editPerson(person: Person) {
         update {
-            val person = Person(displayName = name)
+            it.copy(showAddPersonDialog = true, pendingPersonName = person.displayName, editingPersonId = person.id)
+        }
+    }
+
+    fun savePerson() {
+        val current = state.value
+        val name = current.pendingPersonName.trim()
+        if (name.isBlank()) return
+        val editingId = current.editingPersonId
+        val updated = if (editingId == null) {
+            current.people + Person(displayName = name)
+        } else {
+            current.people.map { if (it.id == editingId) it.copy(displayName = name) else it }
+        }
+        update {
             it.copy(
-                people = it.people + person,
-                draft = it.draft.copy(personId = it.draft.personId.ifBlank { person.id }),
+                people = updated,
+                draft = it.draft.copy(personId = it.draft.personId.ifBlank { updated.firstOrNull()?.id.orEmpty() }),
                 showAddPersonDialog = false,
                 pendingPersonName = "",
-                statusMessage = "已添加人员：$name",
+                editingPersonId = null,
+                statusMessage = if (editingId == null) "已添加人员" else "已更新人员",
+            )
+        }
+    }
+
+    fun deletePerson(personId: String) {
+        update {
+            it.copy(
+                people = it.people.filterNot { person -> person.id == personId },
+                invoices = it.invoices.filterNot { invoice -> invoice.personId == personId },
+                draft = if (it.draft.personId == personId) it.draft.copy(personId = it.people.firstOrNull { person -> person.id != personId }?.id.orEmpty()) else it.draft,
+                editingPersonId = if (it.editingPersonId == personId) null else it.editingPersonId,
+                statusMessage = "已删除人员",
             )
         }
     }
@@ -184,29 +212,61 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
         val gross = current.draft.grossAmount.toMoneyOrNull() ?: return update { it.copy(statusMessage = "请输入正确的含税金额") }
         if (current.draft.personId.isBlank()) return update { it.copy(statusMessage = "请选择所属人员") }
 
-        val invoice = Invoice(
-            id = UUID.randomUUID().toString(),
-            personId = current.draft.personId,
-            grossAmount = gross.toPlainString(),
-            invoiceTaxRatePercent = current.draft.invoiceTaxRatePercent,
-            issuedOn = current.draft.issuedOn,
-            attachmentName = current.draft.attachmentName,
-            attachmentPath = current.draft.attachmentPath,
-            sourceFormat = current.draft.sourceFormat,
-            note = current.draft.note,
-            invoiceNumber = current.draft.invoiceNumber,
-        )
-
+        val invoiceId = current.editingInvoiceId
+        val invoice = current.draft.toInvoice(invoiceId)
         val nextRate = current.people.firstOrNull { it.id == invoice.personId }?.defaultInvoiceTaxRatePercent ?: 1
         update {
             it.copy(
-                invoices = it.invoices + invoice,
+                invoices = it.invoices.filterNot { item -> item.id == invoice.id } + invoice,
                 draft = InvoiceDraft(
                     personId = invoice.personId,
                     issuedOn = LocalDate.now(),
                     invoiceTaxRatePercent = nextRate,
                 ),
+                editingInvoiceId = null,
                 statusMessage = "已保存发票",
+            )
+        }
+    }
+
+    fun editInvoice(invoice: Invoice) {
+        update { it.copy(draft = invoice.toDraft(), activeTab = AppTab.Entry, editingInvoiceId = invoice.id) }
+    }
+
+    fun deleteInvoice(invoiceId: String) {
+        update { it.copy(invoices = it.invoices.filterNot { invoice -> invoice.id == invoiceId }, statusMessage = "已删除发票") }
+    }
+
+    fun redFlushInvoice(invoice: Invoice) {
+        update {
+            it.copy(
+                draft = invoice.toDraft().copy(
+                    grossAmount = invoice.grossAmount,
+                    isRedFlush = true,
+                    originalInvoiceId = invoice.id,
+                    note = "红冲 ${invoice.invoiceNumber}",
+                ),
+                activeTab = AppTab.Entry,
+                statusMessage = "已载入红冲草稿",
+            )
+        }
+    }
+
+    fun saveRedFlush() {
+        val current = state.value
+        val sourceId = current.draft.originalInvoiceId ?: return saveInvoice()
+        val source = current.invoices.firstOrNull { it.id == sourceId } ?: return
+        val red = repository.createRedFlush(source, current.draft)
+        update {
+            it.copy(
+                invoices = it.invoices.filterNot { item -> item.id == red.id } + red,
+                draft = InvoiceDraft(
+                    personId = red.personId,
+                    issuedOn = LocalDate.now(),
+                    invoiceTaxRatePercent = red.invoiceTaxRatePercent,
+                ),
+                editingInvoiceId = null,
+                statusMessage = "已保存红冲发票",
             )
         }
     }
@@ -261,7 +321,12 @@ fun TaxLedgerApp() {
                     NavigationRail {
                         Spacer(Modifier.height(12.dp))
                         tabs.forEach { tab ->
-                            NavigationRailItem(selected = state.activeTab == tab, onClick = { viewModel.setTab(tab) }, icon = { Icon(tab.icon(), contentDescription = tab.title) }, label = { Text(tab.title) })
+                            NavigationRailItem(
+                                selected = state.activeTab == tab,
+                                onClick = { viewModel.setTab(tab) },
+                                icon = { Icon(tab.icon(), contentDescription = tab.title) },
+                                label = { Text(tab.title) },
+                            )
                         }
                     }
                     Column(modifier = Modifier.fillMaxWidth()) {
@@ -275,7 +340,12 @@ fun TaxLedgerApp() {
                     bottomBar = {
                         NavigationBar {
                             tabs.forEach { tab ->
-                                NavigationBarItem(selected = state.activeTab == tab, onClick = { viewModel.setTab(tab) }, icon = { Icon(tab.icon(), contentDescription = tab.title) }, label = { Text(tab.title) })
+                                NavigationBarItem(
+                                    selected = state.activeTab == tab,
+                                    onClick = { viewModel.setTab(tab) },
+                                    icon = { Icon(tab.icon(), contentDescription = tab.title) },
+                                    label = { Text(tab.title) },
+                                )
                             }
                         }
                     },
@@ -290,16 +360,17 @@ fun TaxLedgerApp() {
 
     if (state.showAddPersonDialog) {
         AlertDialog(
-            onDismissRequest = viewModel::dismissAddPersonDialog,
-            confirmButton = { TextButton(onClick = viewModel::addPerson) { Text("添加") } },
-            dismissButton = { TextButton(onClick = viewModel::dismissAddPersonDialog) { Text("取消") } },
-            title = { Text("新增人员") },
+            onDismissRequest = viewModel::dismissPersonDialog,
+            confirmButton = { TextButton(onClick = viewModel::savePerson) { Text("保存") } },
+            dismissButton = { TextButton(onClick = viewModel::dismissPersonDialog) { Text("取消") } },
+            title = { Text(if (state.editingPersonId == null) "新增人员" else "编辑人员") },
             text = {
                 OutlinedTextField(
                     value = state.pendingPersonName,
                     onValueChange = viewModel::updatePendingPersonName,
                     singleLine = true,
                     label = { Text("名称") },
+                    modifier = Modifier.fillMaxWidth(),
                 )
             },
         )
@@ -313,9 +384,7 @@ private fun AppTopBar(state: LedgerUiState, viewModel: LedgerViewModel, reposito
         if (uri != null) {
             val files = viewModel.exportQuarter(repository)
             val exportedText = files.joinToString("\n") { it.absolutePath }
-            context.contentResolver.openOutputStream(uri)?.use { output ->
-                output.write(exportedText.toByteArray())
-            }
+            context.contentResolver.openOutputStream(uri)?.use { output -> output.write(exportedText.toByteArray()) }
         }
     }
 
@@ -331,7 +400,7 @@ private fun AppTopBar(state: LedgerUiState, viewModel: LedgerViewModel, reposito
                 Icon(Icons.Default.Download, contentDescription = "导出")
             }
             IconButton(onClick = { viewModel.setTab(AppTab.Settings) }) {
-                Icon(Icons.Default.FilterAlt, contentDescription = "设置")
+                Icon(Icons.Default.Settings, contentDescription = "设置")
             }
         },
     )
@@ -349,7 +418,7 @@ private fun AppContent(state: LedgerUiState, viewModel: LedgerViewModel, reposit
         }
 
         when (state.activeTab) {
-            AppTab.Overview -> OverviewTab(state)
+            AppTab.Overview -> OverviewTab(state, viewModel)
             AppTab.Entry -> EntryTab(state, viewModel, repository)
             AppTab.Quarter -> QuarterTab(state, viewModel)
             AppTab.People -> PeopleTab(state, viewModel)
@@ -359,12 +428,10 @@ private fun AppContent(state: LedgerUiState, viewModel: LedgerViewModel, reposit
 }
 
 @Composable
-private fun OverviewTab(state: LedgerUiState) {
+private fun OverviewTab(state: LedgerUiState, viewModel: LedgerViewModel) {
     val quarterInvoices = state.currentQuarterInvoices()
     val totals = buildQuarterTotals(quarterInvoices, state.taxSettings)
-    val summaries = state.people.filter { it.isEnabled }.map {
-        buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings)
-    }
+    val summaries = state.people.filter { it.isEnabled }.map { buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings) }
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SummaryHero(state, totals)
@@ -377,7 +444,7 @@ private fun OverviewTab(state: LedgerUiState) {
         summaries.forEach { PersonSummaryCard(it) }
         SectionTitle("最近发票")
         state.invoices.takeLast(6).asReversed().forEach { invoice ->
-            InvoiceRow(invoice, state.people.firstOrNull { it.id == invoice.personId }?.displayName ?: "未命名")
+            InvoiceRow(invoice, state.people.firstOrNull { it.id == invoice.personId }?.displayName ?: "未命名", onEdit = { viewModel.editInvoice(invoice) }, onDelete = { viewModel.deleteInvoice(invoice.id) }, onRedFlush = { viewModel.redFlushInvoice(invoice) })
         }
     }
 }
@@ -390,15 +457,14 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
     val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
     val ofdPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
+    val xmlPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
 
     if (draft.personId.isBlank() && enabledPeople.isNotEmpty()) {
-        viewModel.updateDraft {
-            it.copy(personId = enabledPeople.first().id, invoiceTaxRatePercent = enabledPeople.first().defaultInvoiceTaxRatePercent)
-        }
+        viewModel.updateDraft { it.copy(personId = enabledPeople.first().id, invoiceTaxRatePercent = enabledPeople.first().defaultInvoiceTaxRatePercent) }
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        SectionTitle("新增发票")
+        SectionTitle(if (draft.isRedFlush) "红冲发票" else if (state.editingInvoiceId != null) "编辑发票" else "新增发票")
         OutlinedCard {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 PersonPicker(
@@ -420,7 +486,7 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     AssistChip(onClick = { viewModel.updateDraft { it.copy(issuedOn = LocalDate.now()) } }, label = { Text(formatDate(draft.issuedOn)) }, leadingIcon = { Icon(Icons.Default.CalendarMonth, contentDescription = null) })
                     AssistChip(onClick = {}, label = { Text(draft.sourceFormat?.label ?: "导入文件") }, leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null) })
                 }
@@ -429,16 +495,17 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
                     ImportButton("PDF", Icons.Default.PictureAsPdf) { pdfPicker.launch(arrayOf("application/pdf")) }
                     ImportButton("图片", Icons.Default.UploadFile) { imagePicker.launch(arrayOf("image/*")) }
                     ImportButton("OFD", Icons.Default.Description) { ofdPicker.launch(arrayOf("*/*")) }
+                    ImportButton("XML", Icons.Default.Description) { xmlPicker.launch(arrayOf("application/xml", "text/xml", "*/*")) }
                 }
 
                 OutlinedTextField(value = draft.note, onValueChange = { value -> viewModel.updateDraft { it.copy(note = value) } }, modifier = Modifier.fillMaxWidth(), label = { Text("备注") }, minLines = 2)
-
                 BreakdownPreview(preview)
 
-                Button(onClick = viewModel::saveInvoice, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Add, contentDescription = null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("保存发票")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(onClick = if (draft.isRedFlush) viewModel::saveRedFlush else viewModel::saveInvoice, modifier = Modifier.weight(1f)) {
+                        Text(if (draft.isRedFlush) "保存红冲" else if (state.editingInvoiceId != null) "保存修改" else "保存发票")
+                    }
+                    OutlinedButton(onClick = { viewModel.updateDraft { it.copy(isRedFlush = false, originalInvoiceId = null) } }) { Text("清除红冲") }
                 }
             }
         }
@@ -449,15 +516,12 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
 private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel) {
     val quarterInvoices = state.currentQuarterInvoices()
     val totals = buildQuarterTotals(quarterInvoices, state.taxSettings)
-    val summaries = state.people.filter { it.isEnabled }.map {
-        buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings)
-    }
-
+    val summaries = state.people.filter { it.isEnabled }.map { buildQuarterPersonSummary(it, quarterInvoices.filter { invoice -> invoice.personId == it.id }, state.taxSettings) }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SectionTitle("季度汇总")
         QuarterSelector(state.selectedYear, state.selectedQuarter, viewModel::setQuarter)
         SummaryHero(state, totals)
-        SectionTitle("税项明细")
+        SectionTitle("税费明细")
         TaxLineSection(state, totals)
         SectionTitle("人员分摊")
         summaries.forEach { PersonSummaryCard(it) }
@@ -474,17 +538,21 @@ private fun PeopleTab(state: LedgerUiState, viewModel: LedgerViewModel) {
             Text("新增人员")
         }
         state.people.forEach { person ->
-            ElevatedCard {
+            ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Column {
                             Text(person.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                             Text(if (person.isEnabled) "启用中" else "已停用", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        FilterChip(selected = person.isEnabled, onClick = { viewModel.togglePersonEnabled(person.id) }, label = { Text(if (person.isEnabled) "停用" else "启用") })
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(selected = person.isEnabled, onClick = { viewModel.togglePersonEnabled(person.id) }, label = { Text(if (person.isEnabled) "停用" else "启用") })
+                            FilterChip(selected = false, onClick = { viewModel.editPerson(person) }, label = { Text("编辑") })
+                            FilterChip(selected = false, onClick = { viewModel.deletePerson(person.id) }, label = { Text("删除") })
+                        }
                     }
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("默认税率")
+                        Text("默认税率", style = MaterialTheme.typography.labelLarge)
                         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                             listOf(1, 3).forEachIndexed { index, rate ->
                                 SegmentedButton(selected = person.defaultInvoiceTaxRatePercent == rate, onClick = { viewModel.updatePersonDefaultRate(person.id, rate) }, shape = SegmentedButtonDefaults.itemShape(index = index, count = 2)) { Text("$rate%") }
@@ -499,17 +567,54 @@ private fun PeopleTab(state: LedgerUiState, viewModel: LedgerViewModel) {
 
 @Composable
 private fun SettingsTab(state: LedgerUiState, viewModel: LedgerViewModel) {
+    var thresholdText by remember(state.taxSettings.quarterlyEducationThreshold) { mutableStateOf(state.taxSettings.quarterlyEducationThreshold.toString()) }
+
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        SectionTitle("税务参数")
-        ElevatedCard {
+        SectionTitle("系统设置")
+        ElevatedCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("城建税税率")
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                    listOf(1, 5, 7).forEachIndexed { index, rate ->
-                        SegmentedButton(selected = state.taxSettings.cityConstructionTaxRatePercent == rate, onClick = { viewModel.updateTaxSettings { it.copy(cityConstructionTaxRatePercent = rate) } }, shape = SegmentedButtonDefaults.itemShape(index = index, count = 3)) { Text("$rate%") }
-                    }
+                RateGroup("城建税", state.taxSettings.cityConstructionTaxRatePercent, listOf(1, 5, 7)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(cityConstructionTaxRatePercent = rate) }
                 }
-                Text("教育费附加和地方教育附加按你提供的规则计算；季度阈值默认30万元。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                RateGroup("城建税减征", state.taxSettings.cityConstructionTaxReductionPercent, listOf(0, 25, 50, 100)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(cityConstructionTaxReductionPercent = rate) }
+                }
+                RateGroup("教育费附加", state.taxSettings.educationFeeRatePercent, listOf(1, 3, 5)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(educationFeeRatePercent = rate) }
+                }
+                RateGroup("教育费减征", state.taxSettings.educationFeeReductionPercent, listOf(0, 50, 100)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(educationFeeReductionPercent = rate) }
+                }
+                RateGroup("地方教育附加", state.taxSettings.localEducationFeeRatePercent, listOf(1, 2, 3)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(localEducationFeeRatePercent = rate) }
+                }
+                RateGroup("地方教育减征", state.taxSettings.localEducationFeeReductionPercent, listOf(0, 50, 100)) { rate ->
+                    viewModel.updateTaxSettings { settings -> settings.copy(localEducationFeeReductionPercent = rate) }
+                }
+
+                OutlinedTextField(
+                    value = thresholdText,
+                    onValueChange = { value ->
+                        thresholdText = value.filter { it.isDigit() }
+                        thresholdText.toLongOrNull()?.let { next -> viewModel.updateTaxSettings { settings -> settings.copy(quarterlyEducationThreshold = next) } }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("季度免征阈值") },
+                    suffix = { Text("元") },
+                    singleLine = true,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun RateGroup(label: String, selected: Int, values: List<Int>, onSelect: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            values.forEachIndexed { index, rate ->
+                SegmentedButton(selected = selected == rate, onClick = { onSelect(rate) }, shape = SegmentedButtonDefaults.itemShape(index = index, count = values.size)) { Text("$rate%") }
             }
         }
     }
@@ -521,13 +626,13 @@ private fun SummaryHero(state: LedgerUiState, totals: QuarterTotals) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("当前季度", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
             Text(quarterLabel(state.selectedYear, state.selectedQuarter), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 MetricBlock("含税总额", "¥${totals.grossAmount.format2()}")
                 MetricBlock("不含税额", "¥${totals.taxableAmount.format2()}")
                 MetricBlock("应缴税费", "¥${totals.totalPayable.format2()}")
             }
             if (totals.taxableThresholdReached) {
-                AssistChip(onClick = {}, label = { Text("季度销售额已超过30万元") }, leadingIcon = { Icon(Icons.Default.WarningAmber, contentDescription = null) })
+                AssistChip(onClick = {}, label = { Text("本季度销售额已超过免征阈值") }, leadingIcon = { Icon(Icons.Default.WarningAmber, contentDescription = null) })
             }
         }
     }
@@ -535,13 +640,10 @@ private fun SummaryHero(state: LedgerUiState, totals: QuarterTotals) {
 
 @Composable
 private fun TaxLineSection(state: LedgerUiState, totals: QuarterTotals) {
-    val city = TaxLine("城市维护建设税", totals.vat, state.taxSettings.cityConstructionTaxRatePercent, totals.cityTax / 0.5, totals.cityTax, 50, totals.cityTax, totals.cityTax)
-    val education = TaxLine("教育费附加", totals.vat, 3, totals.educationFee, if (totals.educationFee == 0.0) totals.educationFee else 0.0, if (totals.educationFee == 0.0) 100 else 0, if (totals.educationFee == 0.0) totals.educationFee else 0.0, totals.educationFee, totals.educationFee == 0.0)
-    val local = TaxLine("地方教育附加", totals.vat, 2, totals.localEducationFee, if (totals.localEducationFee == 0.0) totals.localEducationFee else 0.0, if (totals.localEducationFee == 0.0) 100 else 0, if (totals.localEducationFee == 0.0) totals.localEducationFee else 0.0, totals.localEducationFee, totals.localEducationFee == 0.0)
-
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        listOf(city, education, local).forEach { TaxLineCard(it) }
-    }
+    val city = buildTaxLine("城市维护建设税", totals.vat, state.taxSettings.cityConstructionTaxRatePercent, state.taxSettings.cityConstructionTaxReductionPercent)
+    val education = buildTaxLine("教育费附加", totals.vat, state.taxSettings.educationFeeRatePercent, if (totals.taxableThresholdReached) 100 else state.taxSettings.educationFeeReductionPercent, totals.taxableThresholdReached)
+    val local = buildTaxLine("地方教育附加", totals.vat, state.taxSettings.localEducationFeeRatePercent, if (totals.taxableThresholdReached) 100 else state.taxSettings.localEducationFeeReductionPercent, totals.taxableThresholdReached)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) { listOf(city, education, local).forEach { TaxLineCard(it) } }
 }
 
 @Composable
@@ -552,12 +654,12 @@ private fun TaxLineCard(line: TaxLine) {
                 Text(line.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text("¥${line.finalPayable.format2()}", fontWeight = FontWeight.Bold)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistChip(onClick = {}, label = { Text("计税依据 ¥${line.taxBase.format2()}") })
                 AssistChip(onClick = {}, label = { Text("税率 ${line.ratePercent}%") })
                 AssistChip(onClick = {}, label = { Text("减征 ${line.reductionPercent}%") })
             }
-            Text(if (line.isExempt) "本期减免后实缴为 0.00" else "本期应补缴金额按规则计算", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(if (line.isExempt) "本项本期减免后实缴为 0.00" else "本项按规则计算实缴金额", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -573,7 +675,7 @@ private fun PersonSummaryCard(summary: QuarterPersonSummary) {
                 }
                 Text("¥${summary.totalPayable.format2()}", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistChip(onClick = {}, label = { Text("含税 ¥${summary.grossAmount.format2()}") })
                 AssistChip(onClick = {}, label = { Text("不含税 ¥${summary.taxableAmount.format2()}") })
                 AssistChip(onClick = {}, label = { Text("税费 ¥${summary.vat.format2()}") })
@@ -583,7 +685,7 @@ private fun PersonSummaryCard(summary: QuarterPersonSummary) {
 }
 
 @Composable
-private fun InvoiceRow(invoice: Invoice, personName: String) {
+private fun InvoiceRow(invoice: Invoice, personName: String, onEdit: () -> Unit, onDelete: () -> Unit, onRedFlush: () -> Unit) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -593,6 +695,11 @@ private fun InvoiceRow(invoice: Invoice, personName: String) {
             Text("${invoice.issuedOn.format(DatePattern)} · ${invoice.invoiceTaxRatePercent}%", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             invoice.invoiceNumber.takeIf { it.isNotBlank() }?.let { Text("票号：$it", style = MaterialTheme.typography.labelMedium) }
             invoice.attachmentName?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = false, onClick = onEdit, label = { Text("编辑") })
+                FilterChip(selected = false, onClick = onDelete, label = { Text("删除") })
+                FilterChip(selected = false, onClick = onRedFlush, label = { Text("红冲") })
+            }
         }
     }
 }
@@ -603,7 +710,7 @@ private fun BreakdownPreview(breakdown: InvoiceBreakdown?) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("实时计算", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 MetricBlock("不含税", "¥${breakdown.taxableAmount.format2()}")
                 MetricBlock("增值税", "¥${breakdown.vat.format2()}")
                 MetricBlock("总税费", "¥${breakdown.totalPayable.format2()}")
@@ -640,7 +747,6 @@ private fun SectionTitle(title: String) {
 private fun PersonPicker(people: List<Person>, selectedPersonId: String, onSelected: (Person) -> Unit, onAddPerson: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     val selected = people.firstOrNull { it.id == selectedPersonId } ?: people.firstOrNull()
-
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("所属人员", style = MaterialTheme.typography.labelLarge)
         Box {
@@ -678,8 +784,7 @@ private fun QuarterSelector(selectedYear: Int, selectedQuarter: Int, onChange: (
     }
 }
 
-private fun LedgerUiState.currentQuarterInvoices(): List<Invoice> =
-    invoices.filter { it.issuedOn.year == selectedYear && quarterOf(it.issuedOn) == selectedQuarter }
+private fun LedgerUiState.currentQuarterInvoices(): List<Invoice> = invoices.filter { it.issuedOn.year == selectedYear && quarterOf(it.issuedOn) == selectedQuarter }
 
 private fun AppTab.icon() = when (this) {
     AppTab.Overview -> Icons.Default.Home
@@ -689,25 +794,54 @@ private fun AppTab.icon() = when (this) {
     AppTab.Settings -> Icons.Default.Settings
 }
 
+private fun InvoiceDraft.toInvoice(): Invoice = Invoice(
+    personId = personId,
+    grossAmount = grossAmount,
+    invoiceTaxRatePercent = invoiceTaxRatePercent,
+    issuedOn = issuedOn,
+    attachmentName = attachmentName,
+    attachmentPath = attachmentPath,
+    sourceFormat = sourceFormat,
+    note = note,
+    invoiceNumber = invoiceNumber,
+    isRedFlush = isRedFlush,
+    originalInvoiceId = originalInvoiceId,
+    cityTaxRatePercent = cityTaxRatePercent,
+    educationFeeRatePercent = educationFeeRatePercent,
+    localEducationFeeRatePercent = localEducationFeeRatePercent,
+    cityTaxReductionPercent = cityTaxReductionPercent,
+    educationFeeReductionPercent = educationFeeReductionPercent,
+    localEducationFeeReductionPercent = localEducationFeeReductionPercent,
+)
+
 private fun InvoiceDraft.toInvoicePreview(state: LedgerUiState): InvoiceBreakdown? {
     if (personId.isBlank()) return null
-    val draftInvoice = Invoice(
-        personId = personId,
-        grossAmount = grossAmount,
-        invoiceTaxRatePercent = invoiceTaxRatePercent,
-        issuedOn = issuedOn,
-        attachmentName = attachmentName,
-        attachmentPath = attachmentPath,
-        sourceFormat = sourceFormat,
-        note = note,
-        invoiceNumber = invoiceNumber,
-    )
     val quarterInvoices = state.currentQuarterInvoices().filter { it.issuedOn <= issuedOn }
-    return invoiceBreakdown(draftInvoice, quarterInvoices, state.taxSettings)
+    return invoiceBreakdown(toInvoice(), quarterInvoices, state.taxSettings)
 }
 
 private fun Double.format2(): String = "%.2f".format(this)
-private fun BigDecimal.format2(): String = setScale(2, java.math.RoundingMode.HALF_UP).toPlainString()
+
+private fun InvoiceDraft.toInvoice(existingId: String? = null): Invoice = Invoice(
+    id = existingId ?: UUID.randomUUID().toString(),
+    personId = personId,
+    grossAmount = grossAmount,
+    invoiceTaxRatePercent = invoiceTaxRatePercent,
+    issuedOn = issuedOn,
+    attachmentName = attachmentName,
+    attachmentPath = attachmentPath,
+    sourceFormat = sourceFormat,
+    note = note,
+    invoiceNumber = invoiceNumber,
+    isRedFlush = isRedFlush,
+    originalInvoiceId = originalInvoiceId,
+    cityTaxRatePercent = cityTaxRatePercent,
+    educationFeeRatePercent = educationFeeRatePercent,
+    localEducationFeeRatePercent = localEducationFeeRatePercent,
+    cityTaxReductionPercent = cityTaxReductionPercent,
+    educationFeeReductionPercent = educationFeeReductionPercent,
+    localEducationFeeReductionPercent = localEducationFeeReductionPercent,
+)
 
 private fun LedgerSnapshot.toUiState(seedPeople: List<Person>): LedgerUiState {
     val effectivePeople = if (people.isEmpty()) seedPeople else people

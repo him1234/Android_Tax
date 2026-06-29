@@ -11,12 +11,63 @@ private val DATE_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
 fun BigDecimal.money(): BigDecimal = setScale(SCALE, HALF_UP)
 fun Double.money(): BigDecimal = BigDecimal.valueOf(this).money()
-
 fun String.toMoneyOrNull(): BigDecimal? = runCatching { BigDecimal(trim()) }.getOrNull()?.money()
 
 fun quarterOf(date: LocalDate): Int = ((date.monthValue - 1) / 3) + 1
-
 fun quarterLabel(year: Int, quarter: Int): String = "Q$quarter $year"
+fun formatDate(date: LocalDate): String = DATE_FORMAT.format(date)
+
+private fun rateOf(percent: Int?): BigDecimal = BigDecimal((percent ?: 0)).divide(BigDecimal(100), 4, HALF_UP)
+
+fun buildTaxLine(
+    name: String,
+    taxBase: Double,
+    ratePercent: Int,
+    reductionPercent: Int,
+    isExempt: Boolean = false,
+): TaxLine {
+    val base = taxBase.money()
+    val rate = rateOf(ratePercent)
+    val shouldPay = base.multiply(rate).money()
+    val reduction = shouldPay.multiply(rateOf(reductionPercent)).money()
+    val finalPayable = if (isExempt) BigDecimal.ZERO.money() else shouldPay.subtract(reduction).money()
+    return TaxLine(
+        name = name,
+        taxBase = base.toDouble(),
+        ratePercent = ratePercent,
+        shouldPay = shouldPay.toDouble(),
+        exemptAmount = reduction.toDouble(),
+        reductionPercent = reductionPercent,
+        reductionAmount = reduction.toDouble(),
+        finalPayable = finalPayable.toDouble(),
+        isExempt = isExempt,
+    )
+}
+
+private fun taxLine(
+    name: String,
+    base: BigDecimal,
+    ratePercent: Int?,
+    reductionPercent: Int?,
+    isExempt: Boolean = false,
+): TaxLine {
+    val rate = rateOf(ratePercent)
+    val shouldPay = base.multiply(rate).money()
+    val reduction = rateOf(reductionPercent)
+    val reductionAmount = shouldPay.multiply(reduction).money()
+    val finalPayable = shouldPay.subtract(reductionAmount).money()
+    return TaxLine(
+        name = name,
+        taxBase = base.toDouble(),
+        ratePercent = ratePercent ?: 0,
+        shouldPay = shouldPay.toDouble(),
+        exemptAmount = reductionAmount.toDouble(),
+        reductionPercent = reductionPercent ?: 0,
+        reductionAmount = reductionAmount.toDouble(),
+        finalPayable = if (isExempt) BigDecimal.ZERO.money().toDouble() else finalPayable.toDouble(),
+        isExempt = isExempt,
+    )
+}
 
 fun invoiceBreakdown(
     invoice: Invoice,
@@ -24,64 +75,58 @@ fun invoiceBreakdown(
     taxSettings: TaxSettings,
 ): InvoiceBreakdown {
     val gross = invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO
-    val rate = BigDecimal(invoice.invoiceTaxRatePercent).divide(BigDecimal(100), 4, HALF_UP)
+    val rate = rateOf(invoice.invoiceTaxRatePercent)
     val taxable = gross.divide(BigDecimal.ONE.add(rate), 10, HALF_UP).money()
     val vat = taxable.multiply(rate).money()
 
-    val cityRate = BigDecimal(taxSettings.cityConstructionTaxRatePercent).divide(BigDecimal(100), 4, HALF_UP)
-    val cityShouldPay = vat.multiply(cityRate).money()
-    val cityFinal = cityShouldPay.multiply(BigDecimal("0.5")).money()
+    val cityRate = invoice.cityTaxRatePercent ?: taxSettings.cityConstructionTaxRatePercent
+    val cityReduction = invoice.cityTaxReductionPercent ?: taxSettings.cityConstructionTaxReductionPercent
+    val educationRate = invoice.educationFeeRatePercent ?: taxSettings.educationFeeRatePercent
+    val educationReduction = invoice.educationFeeReductionPercent ?: taxSettings.educationFeeReductionPercent
+    val localRate = invoice.localEducationFeeRatePercent ?: taxSettings.localEducationFeeRatePercent
+    val localReduction = invoice.localEducationFeeReductionPercent ?: taxSettings.localEducationFeeReductionPercent
 
     val taxableBefore = quarterInvoicesBefore.fold(BigDecimal.ZERO) { acc, item ->
         val itemGross = item.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO
-        val itemRate = BigDecimal(item.invoiceTaxRatePercent).divide(BigDecimal(100), 4, HALF_UP)
-        acc + itemGross.divide(BigDecimal.ONE.add(itemRate), 10, HALF_UP).money()
+        val itemRate = rateOf(item.invoiceTaxRatePercent)
+        val itemTaxable = itemGross.divide(BigDecimal.ONE.add(itemRate), 10, HALF_UP).money()
+        if (item.isRedFlush) acc - itemTaxable else acc + itemTaxable
     }.money()
 
-    val educationShouldPay = vat.multiply(BigDecimal("0.03")).money()
-    val localShouldPay = vat.multiply(BigDecimal("0.02")).money()
-    val threshold = BigDecimal(taxSettings.quarterlyEducationThreshold)
-    val thresholdReached = taxableBefore.add(taxable) > threshold
+    val thresholdReached = taxableBefore.add(taxable) > BigDecimal(taxSettings.quarterlyEducationThreshold)
+    val educationShouldPay = vat.multiply(rateOf(educationRate)).money()
+    val localShouldPay = vat.multiply(rateOf(localRate)).money()
 
-    val educationFinal = if (thresholdReached || taxableBefore > threshold) educationShouldPay else BigDecimal.ZERO.money()
-    val localFinal = if (thresholdReached || taxableBefore > threshold) localShouldPay else BigDecimal.ZERO.money()
+    val cityLine = taxLine("城市维护建设税", vat, cityRate, cityReduction, false)
+    val educationLine = taxLine("教育费附加", vat, educationRate, if (thresholdReached) 0 else educationReduction, !thresholdReached)
+    val localLine = taxLine("地方教育附加", vat, localRate, if (thresholdReached) 0 else localReduction, !thresholdReached)
 
+    val cityFinal = cityLine.finalPayable.money()
+    val educationFinal = educationLine.finalPayable.money()
+    val localFinal = localLine.finalPayable.money()
+    val total = vat + cityFinal + educationFinal + localFinal
     return InvoiceBreakdown(
-        taxableAmount = taxable.toDouble(),
-        vat = vat.toDouble(),
-        cityTax = TaxLine(
-            name = "城市维护建设税",
-            taxBase = vat.toDouble(),
-            ratePercent = taxSettings.cityConstructionTaxRatePercent,
-            shouldPay = cityShouldPay.toDouble(),
-            exemptAmount = cityFinal.toDouble(),
-            reductionPercent = 50,
-            reductionAmount = cityFinal.toDouble(),
-            finalPayable = cityFinal.toDouble(),
+        taxableAmount = if (invoice.isRedFlush) taxable.negate().toDouble() else taxable.toDouble(),
+        vat = if (invoice.isRedFlush) vat.negate().toDouble() else vat.toDouble(),
+        cityTax = cityLine.copy(
+            shouldPay = if (invoice.isRedFlush) cityLine.shouldPay * -1 else cityLine.shouldPay,
+            exemptAmount = if (invoice.isRedFlush) cityLine.exemptAmount * -1 else cityLine.exemptAmount,
+            reductionAmount = if (invoice.isRedFlush) cityLine.reductionAmount * -1 else cityLine.reductionAmount,
+            finalPayable = if (invoice.isRedFlush) cityFinal.negate().toDouble() else cityFinal.toDouble(),
         ),
-        educationFee = TaxLine(
-            name = "教育费附加",
-            taxBase = vat.toDouble(),
-            ratePercent = 3,
-            shouldPay = educationShouldPay.toDouble(),
-            exemptAmount = if (educationFinal.compareTo(BigDecimal.ZERO) == 0) educationShouldPay.toDouble() else 0.0,
-            reductionPercent = if (educationFinal.compareTo(BigDecimal.ZERO) == 0) 100 else 0,
-            reductionAmount = if (educationFinal.compareTo(BigDecimal.ZERO) == 0) educationShouldPay.toDouble() else 0.0,
-            finalPayable = educationFinal.toDouble(),
-            isExempt = educationFinal.compareTo(BigDecimal.ZERO) == 0,
+        educationFee = educationLine.copy(
+            shouldPay = if (invoice.isRedFlush) educationLine.shouldPay * -1 else educationLine.shouldPay,
+            exemptAmount = if (invoice.isRedFlush) educationLine.exemptAmount * -1 else educationLine.exemptAmount,
+            reductionAmount = if (invoice.isRedFlush) educationLine.reductionAmount * -1 else educationLine.reductionAmount,
+            finalPayable = if (invoice.isRedFlush) educationFinal.negate().toDouble() else educationFinal.toDouble(),
         ),
-        localEducationFee = TaxLine(
-            name = "地方教育附加",
-            taxBase = vat.toDouble(),
-            ratePercent = 2,
-            shouldPay = localShouldPay.toDouble(),
-            exemptAmount = if (localFinal.compareTo(BigDecimal.ZERO) == 0) localShouldPay.toDouble() else 0.0,
-            reductionPercent = if (localFinal.compareTo(BigDecimal.ZERO) == 0) 100 else 0,
-            reductionAmount = if (localFinal.compareTo(BigDecimal.ZERO) == 0) localShouldPay.toDouble() else 0.0,
-            finalPayable = localFinal.toDouble(),
-            isExempt = localFinal.compareTo(BigDecimal.ZERO) == 0,
+        localEducationFee = localLine.copy(
+            shouldPay = if (invoice.isRedFlush) localLine.shouldPay * -1 else localLine.shouldPay,
+            exemptAmount = if (invoice.isRedFlush) localLine.exemptAmount * -1 else localLine.exemptAmount,
+            reductionAmount = if (invoice.isRedFlush) localLine.reductionAmount * -1 else localLine.reductionAmount,
+            finalPayable = if (invoice.isRedFlush) localFinal.negate().toDouble() else localFinal.toDouble(),
         ),
-        totalPayable = (vat + cityFinal + educationFinal + localFinal).toDouble(),
+        totalPayable = if (invoice.isRedFlush) total.negate().toDouble() else total.toDouble(),
     )
 }
 
@@ -100,7 +145,8 @@ fun buildQuarterTotals(
 
     ordered.forEachIndexed { index, invoice ->
         val breakdown = invoiceBreakdown(invoice, ordered.take(index), taxSettings)
-        gross += invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO
+        val sign = if (invoice.isRedFlush) BigDecimal.ONE.negate() else BigDecimal.ONE
+        gross += (invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO).multiply(sign)
         taxable += BigDecimal.valueOf(breakdown.taxableAmount)
         vat += BigDecimal.valueOf(breakdown.vat)
         city += BigDecimal.valueOf(breakdown.cityTax.finalPayable)
@@ -137,7 +183,8 @@ fun buildQuarterPersonSummary(
 
     ordered.forEachIndexed { index, invoice ->
         val breakdown = invoiceBreakdown(invoice, ordered.take(index), taxSettings)
-        gross += invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO
+        val sign = if (invoice.isRedFlush) BigDecimal.ONE.negate() else BigDecimal.ONE
+        gross += (invoice.grossAmount.toMoneyOrNull() ?: BigDecimal.ZERO).multiply(sign)
         taxable += BigDecimal.valueOf(breakdown.taxableAmount)
         vat += BigDecimal.valueOf(breakdown.vat)
         city += BigDecimal.valueOf(breakdown.cityTax.finalPayable)
@@ -159,8 +206,6 @@ fun buildQuarterPersonSummary(
         totalPayable = total.money().toDouble(),
     )
 }
-
-fun formatDate(date: LocalDate): String = DATE_FORMAT.format(date)
 
 fun buildQuarterExport(
     year: Int,
