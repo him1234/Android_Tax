@@ -1,0 +1,125 @@
+name: Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK 36
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      # The original source archive did not contain gradle-wrapper.jar.
+      - name: Bootstrap Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 \
+            'https://services.gradle.org/distributions/gradle-8.11.1-bin.zip' \
+            -o "$RUNNER_TEMP/gradle.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          "$RUNNER_TEMP/gradle-8.11.1/bin/gradle" wrapper \
+            --gradle-version 8.11.1 --distribution-type bin
+          chmod +x ./gradlew
+
+      - name: Restore original signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.TAXLEDGER_KEYSTORE_BASE64 }}
+          TAXLEDGER_STORE_PASSWORD: ${{ secrets.TAXLEDGER_STORE_PASSWORD }}
+          TAXLEDGER_KEY_ALIAS: ${{ secrets.TAXLEDGER_KEY_ALIAS }}
+          TAXLEDGER_KEY_PASSWORD: ${{ secrets.TAXLEDGER_KEY_PASSWORD }}
+          EXPECTED_CERT: ${{ secrets.TAXLEDGER_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for value in "$KEYSTORE_BASE64" "$TAXLEDGER_STORE_PASSWORD" \
+                       "$TAXLEDGER_KEY_ALIAS" "$TAXLEDGER_KEY_PASSWORD" "$EXPECTED_CERT"; do
+            if [[ -z "$value" ]]; then
+              echo 'Missing signing secret; refusing to publish an incompatible update.' >&2
+              exit 1
+            fi
+          done
+          umask 077
+          key_path="$RUNNER_TEMP/taxledger-release.jks"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          test -s "$key_path"
+          echo "TAXLEDGER_KEYSTORE=$key_path" >> "$GITHUB_ENV"
+
+      - name: Test and build signed release APK
+        env:
+          TAXLEDGER_STORE_PASSWORD: ${{ secrets.TAXLEDGER_STORE_PASSWORD }}
+          TAXLEDGER_KEY_ALIAS: ${{ secrets.TAXLEDGER_KEY_ALIAS }}
+          TAXLEDGER_KEY_PASSWORD: ${{ secrets.TAXLEDGER_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:testReleaseUnitTest :app:assembleRelease
+
+      - name: Verify version, package and signing certificate
+        shell: bash
+        env:
+          EXPECTED_CERT: ${{ secrets.TAXLEDGER_EXPECTED_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          apk='app/build/outputs/apk/release/app-release.apk'
+          test -s "$apk"
+          tools="$ANDROID_HOME/build-tools/36.0.0"
+          "$tools/apksigner" verify --verbose --print-certs "$apk"
+
+          actual_cert=$("$tools/apksigner" verify --print-certs "$apk" |
+            sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+          actual_cert=$(printf '%s' "$actual_cert" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
+          expected_cert=$(printf '%s' "$EXPECTED_CERT" | tr '[:upper:]' '[:lower:]' | tr -d ':[:space:]')
+          if [[ -z "$actual_cert" || "$actual_cert" != "$expected_cert" ]]; then
+            echo 'APK certificate differs from the original installed application.' >&2
+            exit 1
+          fi
+
+          package_info=$("$tools/aapt" dump badging "$apk" | sed -n '1p')
+          package=$(sed -n "s/.* name='\\([^']*\\)'.*/\\1/p" <<< "$package_info")
+          version_name=$(sed -n "s/.* versionName='\\([^']*\\)'.*/\\1/p" <<< "$package_info")
+          version_code=$(sed -n "s/.* versionCode='\\([^']*\\)'.*/\\1/p" <<< "$package_info")
+          [[ "$package" == 'com.example.taxledger' ]]
+          [[ "v$version_name" == "$GITHUB_REF_NAME" ]]
+          [[ "$version_code" =~ ^[0-9]+$ && "$version_code" -gt 3 ]]
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          cp app/build/outputs/apk/release/app-release.apk \
+            "release/TaxLedger-${GITHUB_REF_NAME}.apk"
+          (cd release && sha256sum "TaxLedger-${GITHUB_REF_NAME}.apk" > SHA256SUMS)
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "release/TaxLedger-${GITHUB_REF_NAME}.apk" \
+            release/SHA256SUMS \
+            --verify-tag --generate-notes \
+            --title "TaxLedger $GITHUB_REF_NAME"
