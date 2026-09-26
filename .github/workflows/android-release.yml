@@ -2,8 +2,7 @@ name: Android Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ main ]
 
 concurrency:
   group: android-release-${{ github.ref }}
