@@ -6,6 +6,7 @@
 package com.example.taxledger.ui
 
 import android.net.Uri
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -46,6 +47,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
@@ -66,13 +69,16 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,9 +89,12 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.taxledger.data.AppTab
+import com.example.taxledger.InvoiceScanActivity
+import com.example.taxledger.data.InvoiceFields
 import com.example.taxledger.data.Invoice
 import com.example.taxledger.data.InvoiceBreakdown
 import com.example.taxledger.data.InvoiceDraft
@@ -112,11 +121,16 @@ import com.example.taxledger.data.toMoneyOrNull
 import java.math.BigDecimal
 import java.io.File
 import java.time.LocalDate
+import java.time.Instant
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val DatePattern = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
@@ -135,6 +149,7 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
     fun dismissPersonDialog() = update { it.copy(showAddPersonDialog = false, pendingPersonName = "", editingPersonId = null) }
     fun updatePendingPersonName(value: String) = update { it.copy(pendingPersonName = value) }
     fun consumeStatusMessage() = update { it.copy(statusMessage = null) }
+    fun showStatus(message: String) = update { it.copy(statusMessage = message) }
     fun updateTaxSettings(block: (TaxSettings) -> TaxSettings) = update { it.copy(taxSettings = block(it.taxSettings)) }
     fun updateDraft(block: (InvoiceDraft) -> InvoiceDraft) = update { it.copy(draft = block(it.draft), statusMessage = null) }
 
@@ -196,7 +211,8 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
     }
 
     fun importInvoice(uri: Uri, repository: LedgerRepository) {
-        runCatching {
+        viewModelScope.launch {
+          runCatching {
             val imported = repository.parseImportedInvoice(uri)
             update {
                 val nextPersonId = it.draft.personId.takeIf { personId -> it.people.any { person -> person.id == personId } }
@@ -207,17 +223,34 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
                         personId = nextPersonId,
                         grossAmount = imported.grossAmount,
                         issuedOn = imported.issuedOn,
+                        invoiceTaxRatePercent = imported.taxRatePercent?.takeIf { rate -> rate in listOf(1, 3) } ?: it.draft.invoiceTaxRatePercent,
                         invoiceNumber = imported.invoiceNumber,
                         attachmentName = imported.attachmentName,
                         attachmentPath = imported.attachmentPath,
                         sourceFormat = imported.format,
                     ),
-                    statusMessage = "已识别并回填发票内容",
+                    activeTab = AppTab.Entry,
+                    statusMessage = "${imported.note}：请核对发票号码、日期和金额后保存",
                 )
             }
         }.onFailure { error ->
             update { ui -> ui.copy(statusMessage = "导入失败：${error.message ?: "未知错误"}") }
         }
+        }
+    }
+
+    fun importCameraResult(text: String, qr: String) {
+        val fields = InvoiceFields.fromText(text, qr, "相机实时OCR")
+        update { current -> current.copy(
+            activeTab = AppTab.Entry,
+            draft = current.draft.copy(
+                grossAmount = fields.grossAmount ?: current.draft.grossAmount,
+                invoiceTaxRatePercent = fields.taxRatePercent?.takeIf { it in listOf(1, 3) } ?: current.draft.invoiceTaxRatePercent,
+                invoiceNumber = fields.invoiceNumber.ifBlank { current.draft.invoiceNumber },
+                issuedOn = fields.issuedOn ?: current.draft.issuedOn,
+            ),
+            statusMessage = "相机识别已回填，请核对号码、日期和金额后保存",
+        ) }
     }
 
     fun saveInvoice() {
@@ -296,10 +329,12 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
         }
     }
 
-    fun exportQuarter(repository: LedgerRepository): List<File> {
+    suspend fun exportQuarter(repository: LedgerRepository): List<File> {
         val current = state.value
-        val bundle = buildQuarterExport(current.selectedYear, current.selectedQuarter, current.people, current.invoices, current.taxSettings)
-        val files = repository.exportQuarter(current.selectedYear, current.selectedQuarter, bundle)
+        val files = withContext(Dispatchers.IO) {
+            val bundle = buildQuarterExport(current.selectedYear, current.selectedQuarter, current.people, current.invoices, current.taxSettings)
+            repository.exportQuarter(current.selectedYear, current.selectedQuarter, bundle)
+        }
         update { it.copy(statusMessage = "已导出季度PDF明细") }
         return files
     }
@@ -325,7 +360,7 @@ class LedgerViewModel(private val repository: LedgerRepository) : ViewModel() {
 }
 
 @Composable
-fun TaxLedgerApp() {
+fun TaxLedgerApp(importUri: Uri? = null, onImportHandled: () -> Unit = {}) {
     val context = LocalContext.current.applicationContext
     val repository = remember(context) { LedgerRepository(context) }
     val factory = remember(repository) {
@@ -336,6 +371,9 @@ fun TaxLedgerApp() {
     }
     val viewModel: LedgerViewModel = viewModel(factory = factory)
     val state by viewModel.state.collectAsState()
+    LaunchedEffect(importUri) {
+        importUri?.let { viewModel.importInvoice(it, repository); onImportHandled() }
+    }
     val tabs = AppTab.entries
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
@@ -405,14 +443,18 @@ fun TaxLedgerApp() {
 @Composable
 private fun AppTopBar(state: LedgerUiState, viewModel: LedgerViewModel, repository: LedgerRepository) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         if (uri != null) {
-            val files = viewModel.exportQuarter(repository)
-            val pdfFile = files.firstOrNull { it.extension.equals("pdf", ignoreCase = true) }
-            if (pdfFile != null) {
-                context.contentResolver.openOutputStream(uri)?.use { output ->
-                    pdfFile.inputStream().use { input -> input.copyTo(output) }
-                }
+            scope.launch {
+                runCatching {
+                    val pdfFile = viewModel.exportQuarter(repository).first { it.extension.equals("pdf", true) }
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.use { output ->
+                            pdfFile.inputStream().use { input -> input.copyTo(output) }
+                        } ?: error("无法保存报告")
+                    }
+                }.onFailure { viewModel.showStatus("导出失败：${it.message ?: "未知错误"}") }
             }
         }
     }
@@ -443,13 +485,13 @@ private fun AppContent(state: LedgerUiState, viewModel: LedgerViewModel, reposit
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         state.statusMessage?.let {
-            AssistChip(onClick = viewModel::consumeStatusMessage, label = { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) })
+            AssistChip(onClick = viewModel::consumeStatusMessage, label = { Text(it, maxLines = 3, overflow = TextOverflow.Ellipsis) }, leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) })
         }
 
         when (state.activeTab) {
             AppTab.Overview -> OverviewTab(state, viewModel)
             AppTab.Entry -> EntryTab(state, viewModel, repository)
-            AppTab.Quarter -> QuarterTab(state, viewModel)
+            AppTab.Quarter -> QuarterTab(state, viewModel, repository)
             AppTab.People -> PeopleTab(state, viewModel)
             AppTab.Settings -> SettingsTab(state, viewModel)
         }
@@ -484,6 +526,8 @@ private fun OverviewTab(state: LedgerUiState, viewModel: LedgerViewModel) {
 
 @Composable
 private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repository: LedgerRepository) {
+    val context = LocalContext.current
+    var showDatePicker by remember { mutableStateOf(false) }
     val draft = state.draft
     val preview = draft.toInvoicePreview(state)
     val enabledPeople = state.people.filter { it.isEnabled }
@@ -491,6 +535,30 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
     val ofdPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
     val xmlPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { viewModel.importInvoice(it, repository) } }
+    val scanLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.importCameraResult(
+                result.data?.getStringExtra(InvoiceScanActivity.EXTRA_TEXT).orEmpty(),
+                result.data?.getStringExtra(InvoiceScanActivity.EXTRA_QR).orEmpty(),
+            )
+        }
+    }
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(
+            initialSelectedDateMillis = draft.issuedOn.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+        )
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = { TextButton(onClick = {
+                pickerState.selectedDateMillis?.let { millis ->
+                    val selected = Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate()
+                    viewModel.updateDraft { it.copy(issuedOn = selected) }
+                }
+                showDatePicker = false
+            }) { Text("确定") } },
+            dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } },
+        ) { DatePicker(state = pickerState) }
+    }
 
     if (draft.personId.isBlank() && enabledPeople.isNotEmpty()) {
         viewModel.updateDraft { it.copy(personId = enabledPeople.first().id, invoiceTaxRatePercent = enabledPeople.first().defaultInvoiceTaxRatePercent) }
@@ -498,6 +566,7 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
 
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         SectionTitle(if (draft.isRedFlush) "红冲发票" else if (state.editingInvoiceId != null) "编辑发票" else "新增发票")
+        Text("导入票据或拍摄发票，核对识别字段后保存。二维码用于提取20位发票号码。", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedCard {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 PersonPicker(
@@ -520,7 +589,7 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
                 }
 
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AssistChip(onClick = { viewModel.updateDraft { it.copy(issuedOn = LocalDate.now()) } }, label = { Text(formatDate(draft.issuedOn)) }, leadingIcon = { Icon(Icons.Default.CalendarMonth, contentDescription = null) })
+                    AssistChip(onClick = { showDatePicker = true }, label = { Text("开票日期 ${formatDate(draft.issuedOn)}") }, leadingIcon = { Icon(Icons.Default.CalendarMonth, contentDescription = null) })
                     AssistChip(onClick = {}, label = { Text(draft.sourceFormat?.label ?: "导入文件") }, leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null) })
                 }
 
@@ -529,6 +598,9 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
                     ImportButton("图片", Icons.Default.UploadFile) { imagePicker.launch(arrayOf("image/*")) }
                     ImportButton("OFD", Icons.Default.Description) { ofdPicker.launch(arrayOf("*/*")) }
                     ImportButton("XML", Icons.Default.Description) { xmlPicker.launch(arrayOf("application/xml", "text/xml", "*/*")) }
+                    ImportButton("相机实时OCR", Icons.Default.UploadFile) {
+                        scanLauncher.launch(Intent(context, InvoiceScanActivity::class.java))
+                    }
                 }
 
                 OutlinedTextField(value = draft.note, onValueChange = { value -> viewModel.updateDraft { it.copy(note = value) } }, modifier = Modifier.fillMaxWidth(), label = { Text("备注") }, minLines = 2)
@@ -548,7 +620,23 @@ private fun EntryTab(state: LedgerUiState, viewModel: LedgerViewModel, repositor
 }
 
 @Composable
-private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel) {
+private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel, repository: LedgerRepository) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val reportPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
+        if (uri != null) {
+            scope.launch {
+                runCatching {
+                    val report = viewModel.exportQuarter(repository).first { it.extension.equals("pdf", true) }
+                    withContext(Dispatchers.IO) {
+                        context.contentResolver.openOutputStream(uri)?.use { stream -> report.inputStream().use { it.copyTo(stream) } }
+                            ?: error("无法保存报告")
+                    }
+                }.onSuccess { viewModel.showStatus("季度报告已导出") }
+                    .onFailure { viewModel.showStatus("导出失败：${it.message ?: "未知错误"}") }
+            }
+        }
+    }
     val quarterInvoices = state.currentQuarterInvoices()
     val totals = buildQuarterTotals(quarterInvoices, state.taxSettings)
     val details = buildQuarterInvoiceDetails(state.selectedYear, state.selectedQuarter, state.people, state.invoices, state.taxSettings)
@@ -558,6 +646,15 @@ private fun QuarterTab(state: LedgerUiState, viewModel: LedgerViewModel) {
         SectionTitle("季度汇总")
         QuarterSelector(state.selectedYear, state.selectedQuarter, viewModel::setQuarter)
         SummaryHero(state, totals)
+        Button(
+            onClick = { reportPicker.launch("季度税费内部核对报告_${state.selectedYear}Q${state.selectedQuarter}.pdf") },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Icon(Icons.Default.Download, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text("一键导出本季度报告")
+        }
+        Text("报告包含计算口径、季度合计、人员汇总和逐票明细。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         SectionTitle("税费明细")
         TaxLineSection(state, totals)
         SectionTitle("人员分摊")

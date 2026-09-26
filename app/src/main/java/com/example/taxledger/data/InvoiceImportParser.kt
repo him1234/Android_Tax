@@ -3,6 +3,7 @@ package com.example.taxledger.data
 import android.content.Context
 import android.net.Uri
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.StringReader
@@ -12,34 +13,40 @@ import java.util.Locale
 import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 import org.xml.sax.InputSource
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class InvoiceImportParser(
     private val context: Context,
     private val attachmentsDir: File,
 ) {
-    fun parseAndPersist(uri: Uri): ImportedInvoiceDraft {
+    suspend fun parseAndPersist(uri: Uri): ImportedInvoiceDraft = withContext(Dispatchers.IO) {
         val name = queryDisplayName(uri) ?: "invoice_${System.currentTimeMillis()}"
         val format = inferFormat(name, uri)
         val copied = persistAttachment(uri, name)
-        val parsed = parseFile(copied, format)
-        return ImportedInvoiceDraft(
-            grossAmount = parsed.grossAmount ?: "0.00",
+        val parsed = try { parseFile(copied, format) } catch (error: Exception) {
+            copied.delete()
+            throw error
+        }
+        ImportedInvoiceDraft(
+            grossAmount = parsed.grossAmount.orEmpty(),
             issuedOn = parsed.issuedOn ?: LocalDate.now(),
             invoiceNumber = parsed.invoiceNumber,
             attachmentName = name,
             attachmentPath = copied.absolutePath,
             format = format,
-            note = parsed.sourceHint,
+            note = parsed.sourceHint + if (parsed.grossAmount == null || parsed.invoiceNumber.isBlank()) "（部分字段未识别，请核对）" else "",
+            taxRatePercent = parsed.taxRatePercent,
         )
     }
 
-    private fun parseFile(file: File, format: AttachmentFormat): ParsedInvoiceImport {
+    private suspend fun parseFile(file: File, format: AttachmentFormat): ParsedInvoiceImport {
         val bytes = file.readBytes()
         return when {
             format == AttachmentFormat.Ofd || isZip(bytes) -> parseOfd(bytes)
             format == AttachmentFormat.Xml || looksLikeXml(bytes) -> parseXmlInvoiceSafely(bytes)
-            format == AttachmentFormat.Pdf -> parsePdf(bytes)
-            format == AttachmentFormat.Png || format == AttachmentFormat.Jpg -> parseFallback("", "图片票据需要OCR")
+            format == AttachmentFormat.Pdf -> InvoiceOcr().use { InvoiceFields.fromText(it.pdf(file), hint = "PDF OCR") }
+            format == AttachmentFormat.Png || format == AttachmentFormat.Jpg -> InvoiceOcr().use { InvoiceFields.fromText(it.image(file), hint = "图片 OCR") }
             else -> parseFallback(safeDecode(bytes), "未知格式")
         }
     }
@@ -48,7 +55,18 @@ class InvoiceImportParser(
         val entries = mutableMapOf<String, ByteArray>()
         ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
             generateSequence { zip.nextEntry }.forEach { entry ->
-                if (!entry.isDirectory) entries[entry.name] = zip.readBytes()
+                require(entries.size < 200) { "OFD文件包含过多条目" }
+                if (!entry.isDirectory && entry.name.endsWith(".xml", ignoreCase = true)) {
+                    val output = ByteArrayOutputStream()
+                    val buffer = ByteArray(8192)
+                    while (true) {
+                        val read = zip.read(buffer)
+                        if (read < 0) break
+                        require(output.size() + read <= 4_000_000) { "OFD XML文件过大" }
+                        output.write(buffer, 0, read)
+                    }
+                    entries[entry.name] = output.toByteArray()
+                }
             }
         }
 
@@ -94,7 +112,7 @@ class InvoiceImportParser(
     }
 
     private fun parseOfdText(text: String): ParsedInvoiceImport = ParsedInvoiceImport(
-        grossAmount = maxMoney(text),
+        grossAmount = InvoiceFields.fromText(text.replace(Regex("<[^>]*>"), "\n"), hint = "OFD文本层").grossAmount,
         issuedOn = parseDate(firstMatch(text, """20\d{2}年\d{1,2}月\d{1,2}日""")),
         invoiceNumber = firstMatch(text, """\b\d{20}\b""").orEmpty(),
         taxRatePercent = firstMatch(text, """\b(1|3)%\b""")?.toIntOrNull(),
@@ -123,13 +141,6 @@ class InvoiceImportParser(
         )
     }
 
-    private fun parsePdf(bytes: ByteArray): ParsedInvoiceImport {
-        val text = safeDecode(bytes)
-        val embedded = text.indexOf("<EInvoice")
-        if (embedded >= 0) return parseXmlInvoiceSafely(text.substring(embedded).toByteArray(Charsets.UTF_8))
-        return parseFallback(text, "PDF文本层")
-    }
-
     private fun parseXmlInvoiceSafely(bytes: ByteArray): ParsedInvoiceImport {
         return runCatching { parseXmlInvoice(bytes) }
             .getOrElse { parseStructuredXmlText(safeDecode(bytes)) ?: parseFallback(safeDecode(bytes), "XML文本兜底") }
@@ -149,9 +160,24 @@ class InvoiceImportParser(
     private fun persistAttachment(uri: Uri, fileName: String): File {
         val safeName = sanitizeFileName(fileName.ifBlank { "attachment_${System.currentTimeMillis()}" })
         val target = uniqueFile(File(attachmentsDir, safeName))
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(target).use { output -> input.copyTo(output) }
-        } ?: error("Unable to open attachment")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(32 * 1024)
+                    var size = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        size += read
+                        require(size <= 30L * 1024 * 1024) { "附件大于30 MB" }
+                        output.write(buffer, 0, read)
+                    }
+                }
+            } ?: error("无法读取附件")
+        } catch (error: Exception) {
+            target.delete()
+            throw error
+        }
         return target
     }
 
@@ -202,6 +228,8 @@ class InvoiceImportParser(
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
             setFeature("http://xml.org/sax/features/external-general-entities", false)
             setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+            isXIncludeAware = false
+            isExpandEntityReferences = false
         }
         val builder = factory.newDocumentBuilder()
         val doc = builder.parse(InputSource(StringReader(xml)))
@@ -265,7 +293,8 @@ class InvoiceImportParser(
     private fun parseDate(value: String?): LocalDate? {
         if (value.isNullOrBlank()) return null
         val normalized = value.replace("年", "-").replace("月", "-").replace("日", "").replace("/", "-").replace(".", "-")
-        return runCatching { LocalDate.parse(normalized.take(10)) }.getOrNull()
+        val parts = Regex("""(20\d{2})-(\d{1,2})-(\d{1,2})""").find(normalized)?.destructured ?: return null
+        return runCatching { LocalDate.of(parts.component1().toInt(), parts.component2().toInt(), parts.component3().toInt()) }.getOrNull()
     }
 
     private fun firstMatch(text: String, pattern: String): String? = Regex(pattern).find(text)?.value
@@ -276,15 +305,6 @@ class InvoiceImportParser(
             if (match != null) return match.groupValues[1].replace(",", "")
         }
         return null
-    }
-
-    private fun maxMoney(text: String): String? {
-        return Regex("""\b\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\b""")
-            .findAll(text)
-            .map { it.value.replace(",", "") }
-            .mapNotNull { it.toDoubleOrNull()?.let { d -> it to d } }
-            .maxByOrNull { it.second }
-            ?.first
     }
 
     private fun parseOfdTaggedValues(customTagXml: String, contentXml: String): Map<String, String> {

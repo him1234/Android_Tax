@@ -6,18 +6,26 @@ plugins {
 
 android {
     namespace = "com.example.taxledger"
-    compileSdk = 34
+    compileSdk = 36
 
-    signingConfigs {
-        getByName("debug")
+    val existingKeystore = System.getenv("TAXLEDGER_KEYSTORE")
+    if (!existingKeystore.isNullOrBlank()) {
+        signingConfigs {
+            create("existing") {
+                storeFile = file(existingKeystore)
+                storePassword = System.getenv("TAXLEDGER_STORE_PASSWORD")
+                keyAlias = System.getenv("TAXLEDGER_KEY_ALIAS")
+                keyPassword = System.getenv("TAXLEDGER_KEY_PASSWORD")
+            }
+        }
     }
 
     defaultConfig {
         applicationId = "com.example.taxledger"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 3
-        versionName = "1.0.2"
+        targetSdk = 36
+        versionCode = 4
+        versionName = "1.1.0"
     }
 
     buildFeatures {
@@ -27,7 +35,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (existingKeystore.isNullOrBlank()) null else signingConfigs.getByName("existing")
         }
     }
 
@@ -63,7 +71,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
     implementation("com.google.android.material:material:1.12.0")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
 }

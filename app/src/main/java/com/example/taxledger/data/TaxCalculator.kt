@@ -343,7 +343,7 @@ private fun buildFormalQuarterPdfLines(
     totals: QuarterTotals,
     taxSettings: TaxSettings,
 ): List<String> = buildList {
-    add("季度税费备案明细表")
+    add("季度税费内部核对报告")
     add("所属期间：${quarterLabel(year, quarter)}")
     add("生成日期：${formatDate(LocalDate.now())}")
     add("")
@@ -395,8 +395,8 @@ private fun buildFormalQuarterPdfLines(
         }
     }
     add("")
-    add("五、备案说明")
-    add("本文件由本地账本依据已录入发票和系统税费参数自动生成，用于季度内部对账、收款确认及备案审核。")
+    add("五、使用说明")
+    add("本报告依据本地录入发票和当前设置自动计算，用于内部核对；正式申报请以税务机关规定及原始票据为准。")
 }
 
 private fun MutableList<String>.addTaxLine(label: String, line: TaxLine) {

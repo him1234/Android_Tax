@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.graphics.Paint
+import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
@@ -31,6 +32,7 @@ data class ImportedInvoiceDraft(
     val attachmentPath: String,
     val format: AttachmentFormat,
     val note: String = "",
+    val taxRatePercent: Int? = null,
 )
 
 class LedgerRepository(private val context: Context) {
@@ -85,7 +87,7 @@ class LedgerRepository(private val context: Context) {
         return listOf(csvFile, txtFile, pdfFile)
     }
 
-    fun parseImportedInvoice(uri: Uri): ImportedInvoiceDraft = importParser.parseAndPersist(uri)
+    suspend fun parseImportedInvoice(uri: Uri): ImportedInvoiceDraft = importParser.parseAndPersist(uri)
 
     private fun writePdfReport(file: File, lines: List<String>) {
         val pageWidth = 595
@@ -98,14 +100,27 @@ class LedgerRepository(private val context: Context) {
         val bodyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = 11.5f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            color = Color.rgb(34, 49, 66)
         }
         val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = 18f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            color = Color.rgb(20, 92, 139)
+        }
+        val headingPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 14f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            color = Color.rgb(20, 92, 139)
+        }
+        val totalPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = 12f
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            color = Color.rgb(24, 75, 112)
         }
         val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = 9f
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.NORMAL)
+            color = Color.rgb(110, 126, 140)
         }
         val document = PdfDocument()
         var pageNumber = 0
@@ -124,6 +139,8 @@ class LedgerRepository(private val context: Context) {
             pageNumber += 1
             page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
             y = top
+            val accent = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(20, 112, 162) }
+            page?.canvas?.drawRect(left, 31f, pageWidth - right, 34f, accent)
         }
 
         fun ensurePage(heightNeeded: Float = lineHeight) {
@@ -153,11 +170,17 @@ class LedgerRepository(private val context: Context) {
 
         lines.forEachIndexed { index, line ->
             val isTitle = index == 0
-            val paint = if (isTitle) titlePaint else bodyPaint
-            val currentLineHeight = if (isTitle) 28f else lineHeight
+            val isSection = Regex("^[一二三四五六]、").containsMatchIn(line)
+            val isTotal = line.startsWith("本季度应") || line.startsWith("   应向该人员") || line.startsWith("   本张发票应")
+            val paint = when { isTitle -> titlePaint; isSection -> headingPaint; isTotal -> totalPaint; else -> bodyPaint }
+            val currentLineHeight = when { isTitle -> 30f; isSection -> 27f; else -> lineHeight }
             val wrapped = wrapLine(line, paint, pageWidth - left - right)
             wrapped.forEach { text ->
                 ensurePage(currentLineHeight)
+                if (isSection) {
+                    val stripe = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(226, 239, 249) }
+                    page?.canvas?.drawRect(left, y - 17f, pageWidth - right, y + 6f, stripe)
+                }
                 page?.canvas?.drawText(text, left, y, paint)
                 y += currentLineHeight
             }
